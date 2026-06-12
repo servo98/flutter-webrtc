@@ -29,11 +29,17 @@ set(CHATPAPOL_SPEEX_C "../third_party/speex_resampler/resample.c")
 set(CHATPAPOL_DSP_CPP
   "../common/cpp/src/rnnoise_engine.cc"
   "../common/cpp/src/rnnoise_processor.cc")
+# [chatpapol] efectos de voz (voicefx) — DSP autocontenido (sin deps externas)
+set(CHATPAPOL_VOICEFX_CPP
+  "../common/cpp/voicefx/voicefx.cpp"
+  "../common/cpp/voicefx/effects.cpp"
+  "../common/cpp/voicefx/pitch.cpp")
 
 add_library(${PLUGIN_NAME} SHARED
   ${CHATPAPOL_RNNOISE_C}
   ${CHATPAPOL_SPEEX_C}
   ${CHATPAPOL_DSP_CPP}
+  ${CHATPAPOL_VOICEFX_CPP}
   "../common/cpp/src/flutter_common.cc"
   "../common/cpp/src/flutter_data_channel.cc"
   "../common/cpp/src/flutter_data_packet_cryptor.cc"
@@ -55,6 +61,7 @@ add_library(${PLUGIN_NAME} SHARED
 include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/voicefx/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/svpng"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/rnnoise/include"
@@ -72,7 +79,11 @@ set_source_files_properties(${CHATPAPOL_SPEEX_C} PROPERTIES
   COMPILE_DEFINITIONS "OUTSIDE_SPEEX;FLOATING_POINT;EXPORT=;RANDOM_PREFIX=rnnoise_rs;_CRT_SECURE_NO_WARNINGS"
   COMPILE_OPTIONS "/w")
 set_source_files_properties(${CHATPAPOL_DSP_CPP} PROPERTIES
-  COMPILE_DEFINITIONS "RANDOM_PREFIX=rnnoise_rs;OUTSIDE_SPEEX;FLOATING_POINT;RNNOISE_EXPORT=")
+  COMPILE_DEFINITIONS "RANDOM_PREFIX=rnnoise_rs;OUTSIDE_SPEEX;FLOATING_POINT;RNNOISE_EXPORT="
+  COMPILE_OPTIONS "/w")
+# voicefx: DSP propio; /w para que /WX no rompa el build por warnings benignos.
+set_source_files_properties(${CHATPAPOL_VOICEFX_CPP} PROPERTIES
+  COMPILE_OPTIONS "/w")
 
 apply_standard_settings(${PLUGIN_NAME})
 set_target_properties(${PLUGIN_NAME} PROPERTIES

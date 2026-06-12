@@ -1300,9 +1300,35 @@ void FlutterWebRTC::HandleMethodCall(
     bool enabled = false;
     auto it = params.find(EncodableValue("enabled"));
     if (it != params.end()) enabled = GetValue<bool>(it->second);
+    auto proc = rnnoise_processor();
+    proc->SetRnnoise(enabled);
+    // El post-procesador queda registrado mientras RNNoise O los efectos de voz
+    // estén activos (es uno solo para ambos).
     auto apm = audio_processing();
     if (apm) {
-      apm->SetCapturePostProcessing(enabled ? rnnoise_processor() : nullptr);
+      apm->SetCapturePostProcessing(proc->active() ? proc : nullptr);
+    }
+    result->Success();
+  } else if (method_call.method_name().compare("setVoiceFx") == 0) {
+    // [chatpapol] aplica/actualiza la cadena de efectos de voz (voicefx) en el
+    // mismo capture post-processing. spec = "wet;gain;type,bypass,pid=val&...|...".
+    if (!method_call.arguments()) {
+      result->Error("Bad Arguments", "Bad arguments received");
+      return;
+    }
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    bool enabled = false;
+    std::string spec;
+    auto it = params.find(EncodableValue("enabled"));
+    if (it != params.end()) enabled = GetValue<bool>(it->second);
+    auto is = params.find(EncodableValue("spec"));
+    if (is != params.end()) spec = GetValue<std::string>(is->second);
+    auto proc = rnnoise_processor();
+    proc->SetVoiceFx(enabled, spec);
+    auto apm = audio_processing();
+    if (apm) {
+      apm->SetCapturePostProcessing(proc->active() ? proc : nullptr);
     }
     result->Success();
   } else {
