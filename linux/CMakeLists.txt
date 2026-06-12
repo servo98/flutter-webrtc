@@ -26,10 +26,11 @@ set(CHATPAPOL_RNNOISE_C
   "../third_party/rnnoise/src/rnn_reader.c")
 set(CHATPAPOL_SPEEX_C "../third_party/speex_resampler/resample.c")
 set(CHATPAPOL_DSP_CPP
-  "../common/cpp/src/rnnoise_engine.cc"
-  "../common/cpp/src/rnnoise_processor.cc")
-# [chatpapol] efectos de voz (voicefx) — DSP autocontenido (sin deps externas)
+  "../common/cpp/src/rnnoise_engine.cc")
+# [chatpapol] efectos de voz (voicefx) — DSP autocontenido (sin deps externas).
+# Incluye el adaptador rnnoise_processor.cc (llama a la C ABI de voicefx).
 set(CHATPAPOL_VOICEFX_CPP
+  "../common/cpp/src/rnnoise_processor.cc"
   "../common/cpp/voicefx/voicefx.cpp"
   "../common/cpp/voicefx/effects.cpp"
   "../common/cpp/voicefx/pitch.cpp")
@@ -84,6 +85,7 @@ set_source_files_properties(${CHATPAPOL_DSP_CPP} PROPERTIES
   COMPILE_OPTIONS "-w")
 # voicefx: DSP propio, sin -Werror para no romper el build por warnings benignos.
 set_source_files_properties(${CHATPAPOL_VOICEFX_CPP} PROPERTIES
+  COMPILE_DEFINITIONS "VOICEFX_BUILD"
   COMPILE_OPTIONS "-w")
 
 apply_standard_settings(${PLUGIN_NAME})

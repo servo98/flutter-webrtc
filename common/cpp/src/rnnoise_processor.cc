@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "voicefx.h"  // C ABI de los efectos (no en el header público)
+
 namespace chatpapol {
 
 namespace {

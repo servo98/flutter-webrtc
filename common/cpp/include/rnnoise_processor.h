@@ -24,7 +24,11 @@
 
 #include "rnnoise_engine.h"
 #include "rtc_audio_processing.h"  // libwebrtc::RTCAudioProcessing::CustomProcessing
-#include "voicefx.h"               // C ABI de los efectos de voz
+
+// Handle opaco de voicefx, forward-declarado: así este header PÚBLICO no arrastra
+// voicefx.h a los dependientes (p.ej. livekit_client) que no tienen su include
+// dir. El .cc sí incluye voicefx.h para llamar a la C ABI.
+struct VfxChain;
 
 namespace chatpapol {
 
