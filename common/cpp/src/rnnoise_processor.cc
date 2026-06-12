@@ -1,10 +1,102 @@
 // rnnoise_processor.cc — ver rnnoise_processor.h.
 #include "rnnoise_processor.h"
 
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "voicefx.h"  // C ABI de los efectos (no en el header público)
+
+// [chatpapol] Monitor local ("escucharme"): reproduce el micro ya procesado en
+// los altavoces vía WinMM waveOut (winmm.lib ya está enlazado). Buffers cortos
+// (10ms) reciclados por WHDR_DONE; si ninguno está libre, DROPEA el frame en
+// vez de bloquear el hilo de audio (preferible un micro-glitch a un hang). Es
+// para PROBAR los efectos: usar AURICULARES (si no, eco/realimentación).
+#ifdef _WIN32
+#include <windows.h>
+#include <mmsystem.h>
+#endif
+
+// Definición del estado del monitor (forward-declarado en el header, PIMPL).
+struct VfxMonitorState {
+  int rate = 0;       // común a todas las plataformas (lo lee EmitMonitorLocked)
+  bool opened = false;
+#ifdef _WIN32
+  HWAVEOUT hwo = nullptr;
+  static constexpr int kN = 24;  // ~240ms de holgura con buffers de 10ms
+  WAVEHDR hdr[kN] = {};
+  std::vector<int16_t> buf[kN];
+  int next = 0;
+
+  bool Open(int sample_rate, int max_frames) {
+    Close();
+    WAVEFORMATEX wfx = {};
+    wfx.wFormatTag = WAVE_FORMAT_PCM;
+    wfx.nChannels = 1;
+    wfx.nSamplesPerSec = static_cast<DWORD>(sample_rate);
+    wfx.wBitsPerSample = 16;
+    wfx.nBlockAlign = static_cast<WORD>(wfx.nChannels * wfx.wBitsPerSample / 8);
+    wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+    if (waveOutOpen(&hwo, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL) !=
+        MMSYSERR_NOERROR) {
+      hwo = nullptr;
+      return false;
+    }
+    for (int i = 0; i < kN; ++i) {
+      buf[i].assign(max_frames > 0 ? max_frames : 480, 0);
+      hdr[i] = WAVEHDR{};
+    }
+    rate = sample_rate;
+    next = 0;
+    opened = true;
+    return true;
+  }
+
+  void Push(const float* s, int n) {
+    if (!opened || !hwo || n <= 0) return;
+    WAVEHDR* h = &hdr[next];
+    if (h->dwFlags & WHDR_PREPARED) {
+      if (!(h->dwFlags & WHDR_DONE)) return;  // aún sonando → dropea (no bloquea)
+      waveOutUnprepareHeader(hwo, h, sizeof(WAVEHDR));
+    }
+    std::vector<int16_t>& b = buf[next];
+    if (static_cast<int>(b.size()) < n) b.resize(n);
+    for (int i = 0; i < n; ++i) {
+      float v = s[i];
+      if (v > 32767.0f) v = 32767.0f;
+      else if (v < -32768.0f) v = -32768.0f;
+      b[i] = static_cast<int16_t>(v);
+    }
+    *h = WAVEHDR{};
+    h->lpData = reinterpret_cast<LPSTR>(b.data());
+    h->dwBufferLength = static_cast<DWORD>(n * sizeof(int16_t));
+    if (waveOutPrepareHeader(hwo, h, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) return;
+    waveOutWrite(hwo, h, sizeof(WAVEHDR));
+    next = (next + 1) % kN;
+  }
+
+  void Close() {
+    if (hwo) {
+      waveOutReset(hwo);
+      for (int i = 0; i < kN; ++i) {
+        if (hdr[i].dwFlags & WHDR_PREPARED)
+          waveOutUnprepareHeader(hwo, &hdr[i], sizeof(WAVEHDR));
+      }
+      waveOutClose(hwo);
+      hwo = nullptr;
+    }
+    opened = false;
+  }
+
+  ~VfxMonitorState() { Close(); }
+#else
+  // No-Windows: monitor no soportado todavía (no-op).
+  bool Open(int, int) { return false; }
+  void Push(const float*, int) {}
+  void Close() {}
+#endif
+};
 
 namespace chatpapol {
 
@@ -109,7 +201,11 @@ void RnnoiseProcessor::Process(int num_bands, int num_frames, int buffer_size,
 
   // 2) voicefx sobre la banda 0 + cero de bandas altas (voz 16k fullband).
   const bool fx_active = fx_on_ && !fx_parsed_.empty();
-  if (!fx_active) return;
+  if (!fx_active) {
+    // Sin efectos: monitor reproduce la banda 0 del canal 0 (post-RNNoise).
+    if (monitor_on_) EmitMonitorLocked(num_frames, buffer);
+    return;
+  }
 
   const int band_rate = rate_ > 0 ? rate_ / num_bands : 16000;
   if (fx_dirty_ || fx_rate_ != band_rate || fx_frames_ < num_frames ||
@@ -146,6 +242,9 @@ void RnnoiseProcessor::Process(int num_bands, int num_frames, int buffer_size,
       std::memset(buffer + off, 0, sizeof(float) * static_cast<size_t>(num_frames));
     }
   }
+
+  // Monitor: banda 0 del canal 0 ya con el efecto aplicado.
+  if (monitor_on_) EmitMonitorLocked(num_frames, buffer);
 }
 
 void RnnoiseProcessor::Release() {
@@ -166,6 +265,34 @@ void RnnoiseProcessor::SetVoiceFx(bool enabled, const std::string& spec) {
   fx_on_ = enabled;
   ParseSpec(spec, &fx_wet_, &fx_gain_, &fx_parsed_);
   fx_dirty_ = true;
+}
+
+RnnoiseProcessor::RnnoiseProcessor() = default;
+
+RnnoiseProcessor::~RnnoiseProcessor() {
+  // monitor_ (unique_ptr) se destruye solo → VfxMonitorState::~ cierra waveOut.
+  DestroyFx();
+}
+
+void RnnoiseProcessor::SetMonitor(bool on) {
+  std::lock_guard<std::mutex> lock(mu_);
+  monitor_on_ = on;
+  if (on) {
+    if (!monitor_) monitor_ = std::make_unique<VfxMonitorState>();
+  } else if (monitor_) {
+    monitor_->Close();  // libera waveOut; el objeto se reusa si se reactiva
+  }
+}
+
+// Reproduce [num_frames] muestras (banda 0, canal 0, ya procesadas, escala
+// FloatS16) en el monitor. Abre/reabre el reproductor si cambió el rate. Corre
+// en el hilo de audio bajo mu_; nunca bloquea (Push dropea si va saturado).
+void RnnoiseProcessor::EmitMonitorLocked(int num_frames, const float* band0) {
+  if (!monitor_on_ || !monitor_ || num_frames <= 0 || rate_ <= 0) return;
+  if (!monitor_->opened || monitor_->rate != rate_) {
+    if (!monitor_->Open(rate_, num_frames)) return;
+  }
+  monitor_->Push(band0, num_frames);
 }
 
 bool RnnoiseProcessor::active() {

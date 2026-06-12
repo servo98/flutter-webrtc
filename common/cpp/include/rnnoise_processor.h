@@ -30,6 +30,11 @@
 // dir. El .cc sí incluye voicefx.h para llamar a la C ABI.
 struct VfxChain;
 
+// [chatpapol] Estado del monitor local ("escucharme"): reproductor waveOut
+// (Windows). Forward-decl (PIMPL) para no arrastrar windows.h a este header
+// público; se define en el .cc.
+struct VfxMonitorState;
+
 namespace chatpapol {
 
 // Nodo de la cadena de efectos ya parseado (en el hilo de plataforma) para no
@@ -43,8 +48,12 @@ struct VfxNodeSpec {
 class RnnoiseProcessor
     : public libwebrtc::RTCAudioProcessing::CustomProcessing {
  public:
-  RnnoiseProcessor() = default;
-  ~RnnoiseProcessor() override { DestroyFx(); }
+  // ctor y dtor van EN EL .cc: monitor_ (unique_ptr<VfxMonitorState>) es de tipo
+  // incompleto aquí, así que las funciones que lo destruyen deben compilarse
+  // donde VfxMonitorState está completo (si no, otros TU que construyan un
+  // RnnoiseProcessor fallan con "can't delete an incomplete type").
+  RnnoiseProcessor();
+  ~RnnoiseProcessor() override;
 
   // --- CustomProcessing (hilo de audio) ---
   void Initialize(int sample_rate_hz, int num_channels) override;
@@ -56,11 +65,17 @@ class RnnoiseProcessor
   // --- control (hilo de plataforma; protegido por mu_) ---
   void SetRnnoise(bool on);
   void SetVoiceFx(bool enabled, const std::string& spec);
+  // Monitor local ("escucharme"): reproduce el micro YA PROCESADO en los
+  // altavoces locales (solo suena mientras hay captura, p.ej. en un canal de
+  // voz). Solo Windows por ahora; no-op en otras plataformas.
+  void SetMonitor(bool on);
   bool active();  // ¿hay algo que procesar? (para registrar/desregistrar el APM)
 
  private:
   void RebuildFxLocked(int band_rate, int frames);  // requiere mu_ tomado
   void DestroyFx();                                  // requiere mu_ tomado
+  // Empuja band-0 del canal 0 (ya procesado) al reproductor de monitor.
+  void EmitMonitorLocked(int num_frames, const float* band0);  // requiere mu_
 
   std::mutex mu_;
   int rate_ = 0;
@@ -80,6 +95,10 @@ class RnnoiseProcessor
   std::vector<VfxNodeSpec> fx_parsed_;  // cadena parseada (control thread)
   std::vector<VfxChain*> fx_chains_;    // una cadena mono por canal
   std::vector<float> fx_scratch_;       // buffer [-1,1] reutilizable
+
+  // monitor local ("escucharme")
+  bool monitor_on_ = false;
+  std::unique_ptr<VfxMonitorState> monitor_;  // reproductor waveOut; null si off
 };
 
 }  // namespace chatpapol

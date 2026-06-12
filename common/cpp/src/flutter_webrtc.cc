@@ -1337,6 +1337,21 @@ void FlutterWebRTC::HandleMethodCall(
       apm->SetCapturePostProcessing(proc);
     }
     result->Success();
+  } else if (method_call.method_name().compare("setVoiceMonitor") == 0) {
+    // [chatpapol] monitor local ("escucharme"): reproduce el micro ya procesado
+    // en los altavoces (solo suena mientras hay captura). No toca el APM; vive
+    // dentro del propio post-procesador.
+    if (!method_call.arguments()) {
+      result->Error("Bad Arguments", "Bad arguments received");
+      return;
+    }
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    bool enabled = false;
+    auto it = params.find(EncodableValue("enabled"));
+    if (it != params.end()) enabled = GetValue<bool>(it->second);
+    rnnoise_processor()->SetMonitor(enabled);
+    result->Success();
   } else {
     if (HandleFrameCryptorMethodCall(method_call, std::move(result), &result)) {
       return;
