@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 set(PROJECT_NAME "flutter_webrtc")
-project(${PROJECT_NAME} LANGUAGES CXX)
+project(${PROJECT_NAME} LANGUAGES CXX C)  # [chatpapol] C para RNNoise/speex
 
 if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
   cmake_policy(SET CMP0135 NEW)
@@ -16,7 +16,24 @@ set(PLUGIN_NAME "flutter_webrtc_plugin")
 add_definitions(-DLIB_WEBRTC_API_DLL)
 add_definitions(-DRTC_DESKTOP_DEVICE)
 
+# [chatpapol] supresor de ruido RNNoise (motor + adaptador + libs vendorizadas)
+set(CHATPAPOL_RNNOISE_C
+  "../third_party/rnnoise/src/celt_lpc.c"
+  "../third_party/rnnoise/src/denoise.c"
+  "../third_party/rnnoise/src/kiss_fft.c"
+  "../third_party/rnnoise/src/pitch.c"
+  "../third_party/rnnoise/src/rnn.c"
+  "../third_party/rnnoise/src/rnn_data.c"
+  "../third_party/rnnoise/src/rnn_reader.c")
+set(CHATPAPOL_SPEEX_C "../third_party/speex_resampler/resample.c")
+set(CHATPAPOL_DSP_CPP
+  "../common/cpp/src/rnnoise_engine.cc"
+  "../common/cpp/src/rnnoise_processor.cc")
+
 add_library(${PLUGIN_NAME} SHARED
+  ${CHATPAPOL_RNNOISE_C}
+  ${CHATPAPOL_SPEEX_C}
+  ${CHATPAPOL_DSP_CPP}
   "../common/cpp/src/flutter_common.cc"
   "../common/cpp/src/flutter_data_channel.cc"
   "../common/cpp/src/flutter_data_packet_cryptor.cc"
@@ -40,7 +57,22 @@ include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/svpng"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/rnnoise/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/rnnoise/src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/speex_resampler"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/speex_resampler/speex"
 )
+
+# [chatpapol] defines por-archivo + silenciar warnings del código de terceros
+# (apply_standard_settings activa /WX; /w evita que rnnoise/speex rompan el build).
+set_source_files_properties(${CHATPAPOL_RNNOISE_C} PROPERTIES
+  COMPILE_DEFINITIONS "RNNOISE_EXPORT=;_CRT_SECURE_NO_WARNINGS;_USE_MATH_DEFINES"
+  COMPILE_OPTIONS "/w")
+set_source_files_properties(${CHATPAPOL_SPEEX_C} PROPERTIES
+  COMPILE_DEFINITIONS "OUTSIDE_SPEEX;FLOATING_POINT;EXPORT=;RANDOM_PREFIX=rnnoise_rs;_CRT_SECURE_NO_WARNINGS"
+  COMPILE_OPTIONS "/w")
+set_source_files_properties(${CHATPAPOL_DSP_CPP} PROPERTIES
+  COMPILE_DEFINITIONS "RANDOM_PREFIX=rnnoise_rs;OUTSIDE_SPEEX;FLOATING_POINT;RNNOISE_EXPORT=")
 
 apply_standard_settings(${PLUGIN_NAME})
 set_target_properties(${PLUGIN_NAME} PROPERTIES

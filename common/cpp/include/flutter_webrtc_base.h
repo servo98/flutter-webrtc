@@ -23,6 +23,8 @@
 #include "rtc_peerconnection_factory.h"
 #include "rtc_video_device.h"
 
+#include "rnnoise_processor.h"  // [chatpapol] supresor de ruido RNNoise
+
 namespace flutter_webrtc_plugin {
 
 using namespace libwebrtc;
@@ -51,6 +53,12 @@ class FlutterWebRTCBase {
 
   virtual scoped_refptr<RTCAudioProcessing> audio_processing() {
     return audio_processing_;
+  }
+
+  // [chatpapol] supresor de ruido RNNoise (capture post-processing). El toggle
+  // lo conecta/desconecta via SetCapturePostProcessing; aquí solo vive su dueño.
+  chatpapol::RnnoiseProcessor* rnnoise_processor() {
+    return rnnoise_processor_.get();
   }
 
   virtual scoped_refptr<RTCMediaTrack> MediaTrackForId(const std::string& id);
@@ -114,6 +122,7 @@ class FlutterWebRTCBase {
   scoped_refptr<RTCVideoDevice> video_device_;
   scoped_refptr<RTCDesktopDevice> desktop_device_;
   scoped_refptr<RTCAudioProcessing> audio_processing_;
+  std::unique_ptr<chatpapol::RnnoiseProcessor> rnnoise_processor_;  // [chatpapol]
   RTCConfiguration configuration_;
 
   std::map<std::string, scoped_refptr<libwebrtc::KeyProvider>> key_providers_;

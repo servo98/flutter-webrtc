@@ -20,6 +20,9 @@ FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
   video_device_ = factory_->GetVideoDevice();
   desktop_device_ = factory_->GetDesktopDevice();
   audio_processing_ = factory_->GetAudioProcessing();
+  // [chatpapol] El supresor RNNoise se crea pero NO se activa por defecto; el
+  // método 'setCapturePostProcessing' lo conecta vía SetCapturePostProcessing.
+  rnnoise_processor_ = std::make_unique<chatpapol::RnnoiseProcessor>();
   event_channel_ = EventChannelProxy::Create(messenger_, task_runner_, kEventChannelName);
 }
 

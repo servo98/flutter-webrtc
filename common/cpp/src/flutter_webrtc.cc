@@ -1287,6 +1287,24 @@ void FlutterWebRTC::HandleMethodCall(
       RTCLoggingSeverity severity = str2LogSeverity(severityStr);
       initLoggerCallback(severity);
     }
+  } else if (method_call.method_name().compare("setCapturePostProcessing") ==
+             0) {
+    // [chatpapol] activa/desactiva el supresor RNNoise (capture post-processing).
+    // El APM es GLOBAL del factory: un solo set sobrevive a restartTrack.
+    if (!method_call.arguments()) {
+      result->Error("Bad Arguments", "Bad arguments received");
+      return;
+    }
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    bool enabled = false;
+    auto it = params.find(EncodableValue("enabled"));
+    if (it != params.end()) enabled = GetValue<bool>(it->second);
+    auto apm = audio_processing();
+    if (apm) {
+      apm->SetCapturePostProcessing(enabled ? rnnoise_processor() : nullptr);
+    }
+    result->Success();
   } else {
     if (HandleFrameCryptorMethodCall(method_call, std::move(result), &result)) {
       return;
