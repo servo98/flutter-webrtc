@@ -1306,7 +1306,12 @@ void FlutterWebRTC::HandleMethodCall(
     // estén activos (es uno solo para ambos).
     auto apm = audio_processing();
     if (apm) {
-      apm->SetCapturePostProcessing(proc->active() ? proc : nullptr);
+      // NUNCA pasar nullptr: SetCapturePostProcessing(nullptr) CRASHEA el
+      // proceso en el libwebrtc m144 prebuilt (el impl lo desreferencia sin
+      // comprobar). El procesador hace passthrough no-op cuando está inactivo
+      // (Process() retorna temprano sin tocar el buffer), así que lo dejamos
+      // instalado SIEMPRE y el on/off vive solo en sus flags internos.
+      apm->SetCapturePostProcessing(proc);
     }
     result->Success();
   } else if (method_call.method_name().compare("setVoiceFx") == 0) {
@@ -1328,7 +1333,8 @@ void FlutterWebRTC::HandleMethodCall(
     proc->SetVoiceFx(enabled, spec);
     auto apm = audio_processing();
     if (apm) {
-      apm->SetCapturePostProcessing(proc->active() ? proc : nullptr);
+      // NUNCA nullptr (crashea en m144): ver nota en setCapturePostProcessing.
+      apm->SetCapturePostProcessing(proc);
     }
     result->Success();
   } else {
