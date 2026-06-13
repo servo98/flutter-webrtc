@@ -167,8 +167,10 @@ class Delay final : public Effect {
 };
 
 /* --------------------------------------------------------------------------
- * VFX_BIQUAD — RBJ cookbook 2nd-order filter (LP/HP/BP/notch), transposed
- * direct form II. Coefficients are recomputed per block from smoothed params.
+ * VFX_BIQUAD — RBJ cookbook 2nd-order filter, transposed direct form II.
+ * Modes 0..3 = LP/HP/BP/notch; modes 4..6 = peaking/low-shelf/high-shelf EQ
+ * (those additionally read gainDb). Coefficients are recomputed per block from
+ * smoothed params.
  * ------------------------------------------------------------------------*/
 class BiquadFilter final : public Effect {
  public:
@@ -178,11 +180,11 @@ class BiquadFilter final : public Effect {
   void setParam(int paramId, float value) override;
 
  private:
-  void computeCoeffs(int type, float freq, float q);
+  void computeCoeffs(int type, float freq, float q, float gainDb);
   int sr_ = 48000;
   float b0_ = 1, b1_ = 0, b2_ = 0, a1_ = 0, a2_ = 0;
   float z1_ = 0, z2_ = 0;
-  Param type_, freq_, q_;
+  Param type_, freq_, q_, gainDb_;
 };
 
 /* --------------------------------------------------------------------------
@@ -198,11 +200,22 @@ class RingMod final : public Effect {
  private:
   int sr_ = 48000;
   float phase_ = 0.0f;
+  /* Anti-aliasing: 2x oversampled multiplication. xPrev_ is the previous
+   * input sample (for linear upsample of the dry signal to 2x); lpZ_ is the
+   * state of a one-pole LP (~6.5 kHz) applied at the 2x rate before
+   * decimation, so the folded upper sideband is attenuated before it can
+   * alias back into band. All pre-set in prepare(). */
+  float xPrev_ = 0.0f;
+  float lpZ_ = 0.0f;
+  float lpA_ = 0.0f; /* one-pole coeff at 2x rate, computed in prepare() */
   Param freq_, mix_;
 };
 
 /* --------------------------------------------------------------------------
  * VFX_DISTORTION — tanh waveshaper with linear pre-gain (drive) and wet mix.
+ * Anti-aliased via first-order ADAA (antiderivative log(cosh)/drive) with an
+ * eps-guard falling back to the direct waveshaper near quasi-DC (|x-xPrev|
+ * small) to avoid the 0/0 divergence.
  * ------------------------------------------------------------------------*/
 class Distortion final : public Effect {
  public:
@@ -212,6 +225,10 @@ class Distortion final : public Effect {
   void setParam(int paramId, float value) override;
 
  private:
+  /* ADAA state (one sample of memory): previous input and previous value of
+   * the antiderivative F(x) = log(cosh(x*drive))/drive. */
+  float xPrev_ = 0.0f;
+  float fPrev_ = 0.0f;
   Param drive_, mix_;
 };
 
@@ -276,6 +293,88 @@ class Chorus final : public Effect {
   int sr_ = 48000;
   float phase_ = 0.0f;
   Param rate_, depth_, mix_;
+};
+
+/* --------------------------------------------------------------------------
+ * VFX_BITCRUSH — bit-depth quantizer + integer sample&hold (decimator), wet
+ * mix. Stateless except for the hold counter/value; no buffers.
+ * ------------------------------------------------------------------------*/
+class Bitcrush final : public Effect {
+ public:
+  Bitcrush();
+  void prepare(int sampleRate, int maxFrames) override;
+  void process(float* buf, int n) override;
+  void setParam(int paramId, float value) override;
+
+ private:
+  int holdCount_ = 0;  /* samples since last hold update */
+  float held_ = 0.0f;  /* last sampled-and-held value */
+  Param bits_, downsample_, mix_;
+};
+
+/* --------------------------------------------------------------------------
+ * VFX_VIBRATO — short LFO-modulated delay with NO dry signal: the read-rate
+ * variation bends pitch (true vibrato, distinct from amplitude tremolo).
+ * depthCents maps to a small delay sweep. Same fractional-delay machinery as
+ * Chorus, just 100% wet.
+ * ------------------------------------------------------------------------*/
+class Vibrato final : public Effect {
+ public:
+  Vibrato();
+  void prepare(int sampleRate, int maxFrames) override;
+  void process(float* buf, int n) override;
+  void setParam(int paramId, float value) override;
+
+ private:
+  std::vector<float> buf_;
+  int size_ = 0;
+  int w_ = 0;
+  int sr_ = 48000;
+  float phase_ = 0.0f;
+  Param rate_, depthCents_;
+};
+
+/* --------------------------------------------------------------------------
+ * VFX_FLANGER — short comb (0.5..7 ms) modulated by an LFO with feedback and
+ * wet mix (Chorus + feedback + shorter delay). undenorm() protects the
+ * feedback path.
+ * ------------------------------------------------------------------------*/
+class Flanger final : public Effect {
+ public:
+  Flanger();
+  void prepare(int sampleRate, int maxFrames) override;
+  void process(float* buf, int n) override;
+  void setParam(int paramId, float value) override;
+
+ private:
+  std::vector<float> buf_;
+  int size_ = 0;
+  int w_ = 0;
+  int sr_ = 48000;
+  float phase_ = 0.0f;
+  Param rate_, depth_, feedback_, mix_;
+};
+
+/* --------------------------------------------------------------------------
+ * VFX_COMP — noise gate + downward compressor (mastering dynamics).
+ * Two SEPARATE envelope detectors: a fast PEAK follower drives the gate (so it
+ * does not swallow word attacks), a one-pole RMS follower drives the
+ * compressor. Signal order: gate -> compressor -> makeup. O(n), no buffers.
+ * ------------------------------------------------------------------------*/
+class CompGate final : public Effect {
+ public:
+  CompGate();
+  void prepare(int sampleRate, int maxFrames) override;
+  void process(float* buf, int n) override;
+  void setParam(int paramId, float value) override;
+
+ private:
+  int sr_ = 48000;
+  float gateEnv_ = 0.0f;   /* peak envelope (linear) */
+  float gateGain_ = 0.0f;  /* current gate gain in [0,1] */
+  float rms_ = 0.0f;       /* mean-square envelope */
+  float compGain_ = 1.0f;  /* current compressor gain (linear) */
+  Param gateThresh_, gateRelease_, ratio_, thresh_, attack_, release_, makeup_;
 };
 
 } /* namespace vfx */

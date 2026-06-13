@@ -64,6 +64,82 @@ inline float softClamp(float x) {
   return x < 0.0f ? -y : y;
 }
 
+/* --------------------------------------------------------------------------
+ * Brickwall limiter (master stage, FASE 0a).
+ *
+ * Feedforward peak limiter with a SHORT lookahead so the gain is pulled down
+ * BEFORE the peak reaches the ceiling, instead of clipping it after the fact
+ * (which is what the bare softClamp did). The softClamp is kept AFTER the
+ * limiter as a hard safety net for anything the limiter under-shoots.
+ *
+ * Realtime contract:
+ *   - All buffers (the lookahead ring) are pre-allocated in prepare(); process
+ *     does no alloc/locks/FFTs.
+ *   - Gain envelope feedback is run through undenorm() (FTZ is also active).
+ *
+ * Latency: the lookahead is the ONLY latency this stage adds. We keep it at a
+ * fixed 8 samples == 0.5 ms @16k (0.17 ms @48k) — the minimum that still lets
+ * the smoothed gain start ducking before the sample it guards is emitted. This
+ * matters because the pitch node already eats a large algorithmic latency
+ * budget, so the master must add as little as possible.
+ *
+ * Algorithm (per sample, signal flows newest->oldest through the ring):
+ *   1. push x into the ring; the sample we OUTPUT this step is the one that is
+ *      `kLookahead` samples old.
+ *   2. target gain = min(1, ceiling / peak) where `peak` is the running peak
+ *      detector fed by the INCOMING (future, relative to the output) sample —
+ *      so the gain has `kLookahead` samples to ramp down before that peak is
+ *      emitted.
+ *   3. gain follows target: instant attack (snap down to a falling target),
+ *      one-pole release toward 1.0 (~60 ms) so it recovers smoothly.
+ *   4. emit ring[oldest] * gain.
+ * ------------------------------------------------------------------------*/
+struct Limiter {
+  static constexpr int kLookahead = 8;       /* samples of latency (fixed) */
+  static constexpr float kCeiling = 0.89f;   /* ~ -1 dBFS, linear */
+
+  std::vector<float> ring;  /* pre-allocated, length kLookahead */
+  int w = 0;                /* write index into the ring */
+  float gain = 1.0f;        /* current applied gain (audio-thread only) */
+  float relCoeff = 0.0f;    /* per-sample one-pole release coefficient */
+
+  /* Control thread; MAY allocate. */
+  void prepare(int sampleRate) {
+    ring.assign(static_cast<size_t>(kLookahead), 0.0f);
+    w = 0;
+    gain = 1.0f;
+    /* ~60 ms release: per-sample one-pole coeff for a 1 - e^-1 settle. */
+    const float relMs = 60.0f;
+    const float n = (relMs * 0.001f) * static_cast<float>(sampleRate);
+    relCoeff = (n > 1.0f) ? (1.0f - std::exp(-1.0f / n)) : 1.0f;
+  }
+
+  /* Audio thread; realtime-safe. Processes one sample in place: returns the
+   * limited sample that is `kLookahead` taps behind the input `x`. */
+  inline float process(float x) {
+    /* The sample we are about to overwrite is the oldest one in the ring;
+     * that is what we emit this step (delayed by kLookahead). */
+    const float out = ring[static_cast<size_t>(w)];
+    ring[static_cast<size_t>(w)] = x;
+    w = (w + 1 == kLookahead) ? 0 : (w + 1);
+
+    /* Peak detector looks at the INCOMING sample (the future, w.r.t. `out`):
+     * its peak gets kLookahead samples to ramp the gain down before emission. */
+    const float ax = std::fabs(x);
+    float target = (ax > kCeiling) ? (kCeiling / ax) : 1.0f;
+
+    /* Instant attack toward a lower target, smooth one-pole release back up. */
+    if (target < gain) {
+      gain = target;                         /* duck immediately */
+    } else {
+      gain += (target - gain) * relCoeff;    /* release toward 1.0 */
+    }
+    gain = vfx::undenorm(gain);
+
+    return out * gain;
+  }
+};
+
 /* Scoped FTZ/DAZ on x86 so feedback tails never hit denormal slow paths.
  * (effects also call vfx::undenorm() in their feedback paths as a portable
  * fallback for non-SSE targets.) */
@@ -102,6 +178,10 @@ struct VfxChain {
   /* Master stage (atomic targets + per-block smoothing on the audio side). */
   vfx::Param wetMix;
   vfx::Param outGain;
+
+  /* Brickwall limiter, last in the master chain before the softClamp net.
+   * Its lookahead ring is pre-allocated in vfx_create. */
+  Limiter limiter;
 };
 
 namespace {
@@ -135,6 +215,7 @@ VfxChain* vfx_create(int sampleRate, int maxFrames) {
     c->warm.assign(static_cast<size_t>(maxFrames), 0.0f);
     c->wetMix.init(1.0f);
     c->outGain.init(1.0f);
+    c->limiter.prepare(sampleRate); /* pre-allocates the lookahead ring */
     c->active.store(new Snapshot(), std::memory_order_release);
   } catch (...) {
     delete c;
@@ -256,8 +337,14 @@ void vfx_process(VfxChain* chain, const float* in, float* out, int numFrames) {
     }
   }
 
-  /* Master stage: dry/wet crossfade, output gain, soft clamp. `in` is still
-   * intact here even when in == out, because we only write `out` now. */
+  /* Master stage: dry/wet crossfade, output gain, brickwall limiter, then the
+   * softClamp as a hard safety net. `in` is still intact here even when
+   * in == out, because we only write `out` now.
+   *
+   * The limiter is a feedforward peak limiter with a fixed 8-sample lookahead
+   * (~0.5 ms @16k): it ducks the gain BEFORE a peak hits the ceiling (-1 dBFS)
+   * so loud presets (drive / reverb / delay tails) don't reach the softClamp's
+   * distortion region. softClamp stays as the last-resort hard clamp. */
   const float wm = chain->wetMix.next(vfx::kBlockSmooth);
   const float og = chain->outGain.next(vfx::kBlockSmooth);
   for (size_t i = 0; i < n; ++i) {
@@ -265,7 +352,8 @@ void vfx_process(VfxChain* chain, const float* in, float* out, int numFrames) {
     if (!std::isfinite(dry)) dry = 0.0f;
     float y = (dry * (1.0f - wm) + wet[i] * wm) * og;
     if (!std::isfinite(y)) y = 0.0f;
-    out[i] = softClamp(y);
+    y = chain->limiter.process(y); /* lookahead brickwall, ceiling -1 dBFS */
+    out[i] = softClamp(y);         /* hard net after the limiter */
   }
 
   chain->inUse.store(nullptr, std::memory_order_release);

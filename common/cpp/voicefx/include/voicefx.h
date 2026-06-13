@@ -29,7 +29,7 @@
 #ifndef CHATPAPOL_VOICEFX_H_
 #define CHATPAPOL_VOICEFX_H_
 
-#define VOICEFX_ABI_VERSION 1
+#define VOICEFX_ABI_VERSION 3
 
 /* Maximum number of effect nodes in one chain. vfx_add() fails beyond this. */
 #define VFX_MAX_NODES 16
@@ -65,16 +65,24 @@ typedef enum VfxEffectType {
   VFX_NOISE      = 6, /* Additive noise bed (radio hiss / ambience).         */
   VFX_TREMOLO    = 7, /* Amplitude LFO wobble (old-voice).                   */
   VFX_CHORUS     = 8, /* Modulated short delay (sci-fi shimmer).             */
+  VFX_COMP       = 9, /* Compressor + noise gate (mastering dynamics).       */
+  VFX_BITCRUSH   = 10, /* Bit quantization + sample&hold (8-bit/digital).    */
+  VFX_VIBRATO    = 11, /* Modulated short delay, no dry (pitch wobble).      */
+  VFX_FLANGER    = 12, /* Short comb + LFO + feedback (jet/resonant robot).  */
 
-  VFX_EFFECT_TYPE_COUNT = 9
+  VFX_EFFECT_TYPE_COUNT = 13
 } VfxEffectType;
 
-/* Filter modes for VFX_P_BIQUAD_TYPE (passed as float, compared as int). */
+/* Filter modes for VFX_P_BIQUAD_TYPE (passed as float, compared as int).
+ * 4/5/6 are EQ modes that additionally use VFX_P_BIQUAD_GAIN_DB. */
 typedef enum VfxBiquadType {
-  VFX_BIQUAD_LOWPASS  = 0,
-  VFX_BIQUAD_HIGHPASS = 1,
-  VFX_BIQUAD_BANDPASS = 2,
-  VFX_BIQUAD_NOTCH    = 3
+  VFX_BIQUAD_LOWPASS   = 0,
+  VFX_BIQUAD_HIGHPASS  = 1,
+  VFX_BIQUAD_BANDPASS  = 2,
+  VFX_BIQUAD_NOTCH     = 3,
+  VFX_BIQUAD_PEAKING   = 4, /* parametric bell, boost/cut at FREQ (uses GAIN_DB). */
+  VFX_BIQUAD_LOWSHELF  = 5, /* low shelf below FREQ (uses GAIN_DB).               */
+  VFX_BIQUAD_HIGHSHELF = 6  /* high shelf above FREQ (uses GAIN_DB).              */
 } VfxBiquadType;
 
 /* ----------------------------------------------------------------------------
@@ -96,9 +104,10 @@ typedef enum VfxParamId {
   VFX_P_DELAY_MIX        = 202, /* 0.0..1.0   default 0.50  wet mix (0 = dry only, 1 = echo only). */
 
   /* -- VFX_BIQUAD (300..399) ----------------------------------------------- */
-  VFX_P_BIQUAD_TYPE      = 300, /* 0|1|2|3    default 0     VfxBiquadType (LP/HP/BP/NOTCH). */
+  VFX_P_BIQUAD_TYPE      = 300, /* 0..6       default 0     VfxBiquadType (LP/HP/BP/NOTCH/PEAK/LOWSHELF/HIGHSHELF). */
   VFX_P_BIQUAD_FREQ      = 301, /* 20.0..20000.0 default 1000.0 Hz, cutoff/center frequency. */
   VFX_P_BIQUAD_Q         = 302, /* 0.1..10.0  default 0.707 resonance / bandwidth quality. */
+  VFX_P_BIQUAD_GAIN_DB   = 303, /* -15.0..+15.0 default 0.0 dB, boost/cut for PEAK/LOWSHELF/HIGHSHELF (ignored by LP/HP/BP/NOTCH). */
 
   /* -- VFX_RINGMOD (400..499) ---------------------------------------------- */
   VFX_P_RINGMOD_FREQ     = 400, /* 1.0..2000.0 default 30.0 Hz, sine carrier frequency. */
@@ -123,7 +132,31 @@ typedef enum VfxParamId {
   /* -- VFX_CHORUS (900..999) ----------------------------------------------- */
   VFX_P_CHORUS_RATE      = 900, /* 0.05..5.0  default 0.8   Hz, modulation LFO rate. */
   VFX_P_CHORUS_DEPTH     = 901, /* 0.0..1.0   default 0.4   normalized depth (maps to 0..~8 ms of delay sweep). */
-  VFX_P_CHORUS_MIX       = 902  /* 0.0..1.0   default 0.5   wet mix. */
+  VFX_P_CHORUS_MIX       = 902, /* 0.0..1.0   default 0.5   wet mix. */
+
+  /* -- VFX_COMP (1000..1099) ----------------------------------------------- */
+  VFX_P_COMP_GATE_THRESH  = 1000, /* -80.0..0.0  default -45.0 dBFS, gate opens above this (peak). */
+  VFX_P_COMP_GATE_RELEASE = 1001, /* 10.0..300.0 default 120.0 ms, gate close (release) time. */
+  VFX_P_COMP_RATIO        = 1002, /* 1.0..20.0   default 3.0   compression ratio (N:1). */
+  VFX_P_COMP_THRESH       = 1003, /* -40.0..0.0  default -18.0 dBFS, compressor knee threshold (RMS). */
+  VFX_P_COMP_ATTACK       = 1004, /* 1.0..50.0   default 10.0  ms, compressor attack time. */
+  VFX_P_COMP_RELEASE      = 1005, /* 20.0..300.0 default 100.0 ms, compressor release time. */
+  VFX_P_COMP_MAKEUP       = 1006, /* 0.0..24.0   default 0.0   dB, output makeup gain after compression. */
+
+  /* -- VFX_BITCRUSH (1100..1199) ------------------------------------------- */
+  VFX_P_CRUSH_BITS       = 1100, /* 1.0..16.0  default 8.0   bit depth (quantization levels = 2^bits). */
+  VFX_P_CRUSH_DOWNSAMPLE = 1101, /* 1.0..32.0  default 1.0   integer sample&hold factor (1 = no decimation). */
+  VFX_P_CRUSH_MIX        = 1102, /* 0.0..1.0   default 1.0   wet mix against the clean signal. */
+
+  /* -- VFX_VIBRATO (1200..1299) -------------------------------------------- */
+  VFX_P_VIBRATO_RATE        = 1200, /* 0.1..12.0 default 5.5  Hz, pitch-wobble LFO rate. */
+  VFX_P_VIBRATO_DEPTH_CENTS = 1201, /* 0.0..50.0 default 20.0 cents of pitch deviation (delay-modulation depth). */
+
+  /* -- VFX_FLANGER (1300..1399) -------------------------------------------- */
+  VFX_P_FLANGER_RATE     = 1300, /* 0.05..2.0  default 0.4   Hz, sweep LFO rate. */
+  VFX_P_FLANGER_DEPTH    = 1301, /* 0.0..1.0   default 0.6   normalized sweep depth. */
+  VFX_P_FLANGER_FEEDBACK = 1302, /* 0.0..0.9   default 0.5   comb feedback gain (resonance). */
+  VFX_P_FLANGER_MIX      = 1303  /* 0.0..1.0   default 0.5   wet mix. */
 } VfxParamId;
 
 /* ----------------------------------------------------------------------------
