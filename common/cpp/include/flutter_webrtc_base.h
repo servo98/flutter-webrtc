@@ -24,6 +24,7 @@
 #include "rtc_video_device.h"
 
 #include "rnnoise_processor.h"  // [chatpapol] supresor de ruido RNNoise
+#include "per_user_eq.h"        // [chatpapol] EQ por-usuario (sinks por pista)
 
 namespace flutter_webrtc_plugin {
 
@@ -61,6 +62,11 @@ class FlutterWebRTCBase {
   chatpapol::RnnoiseProcessor* rnnoise_processor() {
     return rnnoise_processor_.get();
   }
+
+  // [chatpapol] Router de EQ por-usuario: dueño de los sinks (uno por pista
+  // remota con EQ activo). Vacío salvo que haya algún EQ activo → cero coste y
+  // cero riesgo en el caso normal. Ver per_user_eq.h / flutter_webrtc.cc.
+  chatpapol::PerUserEqRouter* per_user_eq() { return per_user_eq_.get(); }
 
   virtual scoped_refptr<RTCMediaTrack> MediaTrackForId(const std::string& id);
 
@@ -124,6 +130,7 @@ class FlutterWebRTCBase {
   scoped_refptr<RTCDesktopDevice> desktop_device_;
   scoped_refptr<RTCAudioProcessing> audio_processing_;
   std::unique_ptr<chatpapol::RnnoiseProcessor> rnnoise_processor_;  // [chatpapol]
+  std::unique_ptr<chatpapol::PerUserEqRouter> per_user_eq_;         // [chatpapol]
   RTCConfiguration configuration_;
 
   std::map<std::string, scoped_refptr<libwebrtc::KeyProvider>> key_providers_;

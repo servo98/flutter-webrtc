@@ -24,6 +24,9 @@ FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
   // [chatpapol] El supresor RNNoise se crea pero NO se activa por defecto; el
   // método 'setCapturePostProcessing' lo conecta vía SetCapturePostProcessing.
   rnnoise_processor_ = std::make_unique<chatpapol::RnnoiseProcessor>();
+  // [chatpapol] Router de EQ por-usuario. Empieza vacío: no instala sinks ni
+  // toca SetVolume hasta que Dart llame setUserEq con un EQ no-plano.
+  per_user_eq_ = std::make_unique<chatpapol::PerUserEqRouter>();
   event_channel_ = EventChannelProxy::Create(messenger_, task_runner_, kEventChannelName);
 }
 

@@ -1376,6 +1376,91 @@ void FlutterWebRTC::HandleMethodCall(
     if (it != params.end()) enabled = GetValue<bool>(it->second);
     rnnoise_processor()->SetMonitor(enabled);
     result->Success();
+  } else if (method_call.method_name().compare("setUserEq") == 0) {
+    // [chatpapol] EQ por-usuario, individual y LOCAL. Registra (o actualiza) un
+    // sink sobre la pista remota `trackId`: captura su PCM (AddSink), aplica
+    // graves/medios/agudos + ganancia y lo reproduce por una salida propia.
+    // Silencia el playout nativo de ESA pista con SetVolume(0) para no duplicar.
+    // params: trackId(String), bassDb, midDb, trebleDb(double), gain(double).
+    //
+    // SEGURIDAD: solo se llama cuando Dart tiene un EQ NO-plano para esa pista.
+    // Si el EQ vuelve a plano, Dart llama clearUserEq (restaura SetVolume).
+    //
+    // PLATAFORMA: en NO-Windows la salida waveOut es no-op → reproducir SÍ y
+    // SetVolume(0) dejaría al amigo MUDO. Por eso rechazamos aquí en no-Windows
+    // (además del gating en Dart): NUNCA tocamos SetVolume fuera de Windows.
+#ifndef _WIN32
+    result->Error("setUserEq", "EQ por-usuario solo soportado en Windows");
+    return;
+#else
+    if (!method_call.arguments()) {
+      result->Error("Bad Arguments", "setUserEq() Null arguments received");
+      return;
+    }
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    const std::string trackId = findString(params, "trackId");
+    if (trackId.empty()) {
+      result->Error("setUserEq", "setUserEq() Empty track provided");
+      return;
+    }
+    const double bass = maybeFindDouble(params, "bassDb").value_or(0.0);
+    const double mid = maybeFindDouble(params, "midDb").value_or(0.0);
+    const double treb = maybeFindDouble(params, "trebleDb").value_or(0.0);
+    const double gain = maybeFindDouble(params, "gain").value_or(1.0);
+
+    RTCMediaTrack* track = MediaTrackForId(trackId);
+    if (nullptr == track) {
+      result->Error("setUserEq", "setUserEq() Unable to find provided track");
+      return;
+    }
+    if (0 != track->kind().std_string().compare("audio")) {
+      result->Error("setUserEq", "setUserEq() Only audio tracks");
+      return;
+    }
+    auto audioTrack = static_cast<RTCAudioTrack*>(track);
+    auto* router = per_user_eq();
+    const bool isNew = (router->Find(trackId) == nullptr);
+    auto* sink = router->GetOrCreate(trackId);
+    sink->SetEq((float)bass, (float)mid, (float)treb);
+    sink->SetGain((float)gain);
+    if (isNew) {
+      // ORDEN: primero capturamos el PCM, luego silenciamos el playout nativo.
+      audioTrack->AddSink(sink);
+      audioTrack->SetVolume(0.0);  // evita doble salida (waveOut + ADM)
+    }
+    result->Success();
+#endif
+  } else if (method_call.method_name().compare("clearUserEq") == 0) {
+    // [chatpapol] Desactiva el EQ por-usuario de `trackId`: quita el sink y
+    // restaura el playout nativo (SetVolume(restoreVolume)). ORDEN CRÍTICO:
+    // RemoveSink ANTES de destruir el sink (si no, el hilo de audio podría
+    // llamar OnData sobre un objeto muerto). params: trackId(String),
+    // restoreVolume(double, normalmente outputVolume*userVolume).
+#ifndef _WIN32
+    result->Success();  // en no-Windows nunca instalamos nada: no-op seguro.
+    return;
+#else
+    if (!method_call.arguments()) {
+      result->Error("Bad Arguments", "clearUserEq() Null arguments received");
+      return;
+    }
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    const std::string trackId = findString(params, "trackId");
+    const double restoreVol =
+        maybeFindDouble(params, "restoreVolume").value_or(1.0);
+    auto* router = per_user_eq();
+    auto* sink = router->Find(trackId);
+    RTCMediaTrack* track = MediaTrackForId(trackId);
+    if (track && 0 == track->kind().std_string().compare("audio") && sink) {
+      auto audioTrack = static_cast<RTCAudioTrack*>(track);
+      audioTrack->RemoveSink(sink);          // 1º: corta OnData
+      audioTrack->SetVolume(restoreVol);     // 2º: restaura playout nativo
+    }
+    router->Remove(trackId);                 // 3º: destruye sink (cierra waveOut)
+    result->Success();
+#endif
   } else {
     if (HandleFrameCryptorMethodCall(method_call, std::move(result), &result)) {
       return;

@@ -31,6 +31,7 @@ set(CHATPAPOL_DSP_CPP
 # Incluye el adaptador rnnoise_processor.cc (llama a la C ABI de voicefx).
 set(CHATPAPOL_VOICEFX_CPP
   "../common/cpp/src/rnnoise_processor.cc"
+  "../common/cpp/src/per_user_eq.cc"
   "../common/cpp/voicefx/voicefx.cpp"
   "../common/cpp/voicefx/effects.cpp"
   "../common/cpp/voicefx/pitch.cpp")
