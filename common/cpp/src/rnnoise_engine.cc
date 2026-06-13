@@ -53,7 +53,18 @@ void RnnoiseEngine::ProcessInPlace(float* data, int n) {
     in48_.insert(in48_.end(), data, data + n);
     while (in48_.size() >= static_cast<size_t>(kRnnFrame)) {
       float out[kRnnFrame];
-      rnnoise_process_frame(rnn_, out, in48_.data());
+      last_vad_ = rnnoise_process_frame(rnn_, out, in48_.data());
+      if (vad_preserve_) {
+        // Suelo de supresión ALINEADO (in y out son el MISMO frame → sin
+        // desfase → sin doblado). RNNoise reduce ruido pero la salida nunca
+        // baja del kDry de la señal original → NUNCA corta la voz. No depende
+        // del VAD (poco fiable en este path).
+        constexpr float kDry = 0.30f;  // suelo: máx supresión ~ -10.5 dB
+        const float* in = in48_.data();
+        for (int i = 0; i < kRnnFrame; ++i) {
+          out[i] = kDry * in[i] + (1.0f - kDry) * out[i];
+        }
+      }
       outq_.insert(outq_.end(), out, out + kRnnFrame);
       in48_.erase(in48_.begin(), in48_.begin() + kRnnFrame);
     }
@@ -69,7 +80,7 @@ void RnnoiseEngine::ProcessInPlace(float* data, int n) {
     // 2) RNNoise en frames de 480.
     while (in48_.size() >= static_cast<size_t>(kRnnFrame)) {
       float out[kRnnFrame];
-      rnnoise_process_frame(rnn_, out, in48_.data());
+      last_vad_ = rnnoise_process_frame(rnn_, out, in48_.data());
       den48_.insert(den48_.end(), out, out + kRnnFrame);
       in48_.erase(in48_.begin(), in48_.begin() + kRnnFrame);
     }

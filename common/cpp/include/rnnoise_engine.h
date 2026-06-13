@@ -30,9 +30,24 @@ class RnnoiseEngine {
   // Procesa [n] muestras in-place (escala FloatS16). No-op si passthrough.
   void ProcessInPlace(float* data, int n);
 
+  // [chatpapol] Última probabilidad de VOZ (0..1) que reportó RNNoise en el
+  // último frame procesado. 0 si passthrough/aún sin procesar.
+  float lastVad() const { return last_vad_; }
+
+  // [chatpapol] Gate guiado por voz: en vez de aplicar RNNoise a saco (que
+  // recorta voz floja), mezcla por frame la señal SECA (cuando hay voz, VAD
+  // alto) con la DENOISED (cuando hay silencio, VAD bajo). Se hace DENTRO del
+  // motor para que seco y denoised estén alineados (si se hiciera fuera habría
+  // desfase por la latencia → eco/doblado). Off por defecto (camino normal del
+  // APM intacto); on en la ruta custom 48k.
+  void setVadPreserve(bool on) { vad_preserve_ = on; }
+
  private:
   void Free();
 
+  float last_vad_ = 0.0f;
+  bool vad_preserve_ = false;
+  float vad_env_ = 0.0f;  // envolvente suavizada del VAD (estado del gate)
   int rate_ = 0;
   bool passthrough_ = true;  // true => no toca el audio
   bool native48_ = false;    // rate == 48000 => sin resample

@@ -107,6 +107,14 @@ class RnnoiseProcessor
   std::vector<VfxChain*> fx_chains_;    // una cadena mono por canal
   std::vector<float> fx_scratch_;       // buffer [-1,1] reutilizable
 
+  // [chatpapol 48k] AGC + noise gate adaptativo del path custom (la ruta kCustom
+  // no pasa por el AGC/NS del APM). El gate atenúa el ruido en silencios sin
+  // agachar la voz (RNNoise sí la agachaba a 48k). Estado persistente:
+  float agc_gain_ = 1.0f;
+  float gate_env_ = 0.0f;     // envolvente del nivel (pico suavizado)
+  float gate_floor_ = 1e9f;   // piso de ruido estimado (arranca alto, adapta)
+  float gate_gain_ = 1.0f;    // ganancia del gate (1 abierto … 0.1 cerrado)
+
   // monitor local ("escucharme")
   bool monitor_on_ = false;
   std::unique_ptr<VfxMonitorState> monitor_;  // reproductor waveOut; null si off
