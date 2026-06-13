@@ -71,6 +71,17 @@ class RnnoiseProcessor
   void SetMonitor(bool on);
   bool active();  // ¿hay algo que procesar? (para registrar/desregistrar el APM)
 
+  // --- Ruta de micro kCustom 48k (Stage 4) ---
+  // El micro custom NO pasa por el APM (que baja a 16k): un capturador nativo
+  // (Stage 2) entrega 48 kHz mono FULLBAND y llama a estos métodos directamente
+  // (no vía CustomProcessing::Process). InitializeCustom48 prepara 1 motor
+  // RNNoise a 48k (su rate nativo) y marca la cadena voicefx para recrearse a
+  // 48k. ProcessCustom48 aplica RNNoise + voicefx + monitor in-place sobre el
+  // buffer 48k mono (escala FloatS16, igual que el APM): SIN band-split, SIN el
+  // memset de bandas altas, SIN resample 16k<->48k.
+  void InitializeCustom48();
+  void ProcessCustom48(float* data, int num_frames);
+
  private:
   void RebuildFxLocked(int band_rate, int frames);  // requiere mu_ tomado
   void DestroyFx();                                  // requiere mu_ tomado

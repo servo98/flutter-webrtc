@@ -55,6 +55,8 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_webrtc_base.cc"
   "application_loopback_capturer.cc"
   "loopback_capturer_factory.cc"
+  "../common/cpp/src/mic_capturer_common.cc"
+  "mic_capturer_windows.cc"
   "flutter_webrtc_plugin.cc"
   "task_runner_windows.cc"
 )

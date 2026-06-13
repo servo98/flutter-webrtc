@@ -32,6 +32,7 @@ using namespace libwebrtc;
 class FlutterVideoRenderer;
 class FlutterRTCDataChannelObserver;
 class FlutterPeerConnectionObserver;
+class MicCapturer;  // [chatpapol 48k] capturador de micro nativo (mic_capturer.h)
 
 class FlutterWebRTCBase {
  public:
@@ -129,6 +130,16 @@ class FlutterWebRTCBase {
   std::map<std::string, scoped_refptr<RTCPeerConnection>> peerconnections_;
   std::map<std::string, scoped_refptr<RTCMediaStream>> local_streams_;
   std::map<std::string, scoped_refptr<RTCMediaTrack>> local_tracks_;
+  // [chatpapol 48k] Fuentes de audio kCustom por track_id: una pista de micro
+  // a la que un capturador nativo (Stage 2) le inyecta PCM a 48k vía
+  // CaptureFrame, sin pasar por el APM que baja a 16k. Ver flutter_media_stream.
+  std::map<std::string, scoped_refptr<RTCAudioSource>> custom_audio_sources_;
+  // [chatpapol 48k — Stage 2] Capturadores de micro nativos vivos por track_id.
+  // Cada uno alimenta custom_audio_sources_[track_id] a 48k vía CaptureFrame.
+  // Se crea en startCustomMicCapture y se destruye en stopCustomMicCapture / al
+  // disponer el track. unique_ptr de tipo incompleto: el dtor de FlutterWebRTCBase
+  // (en flutter_webrtc_base.cc, que ahora incluye mic_capturer.h) ve el tipo.
+  std::map<std::string, std::unique_ptr<MicCapturer>> custom_mic_capturers_;
   std::map<std::string, scoped_refptr<RTCVideoCapturer>> video_capturers_;
   std::map<int64_t, std::shared_ptr<FlutterVideoRenderer>> renders_;
   std::map<std::string, std::shared_ptr<FlutterRTCDataChannelObserver>>

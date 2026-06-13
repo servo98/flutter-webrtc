@@ -2,6 +2,7 @@
 
 #include "flutter_data_channel.h"
 #include "flutter_peerconnection.h"
+#include "mic_capturer.h"  // [chatpapol 48k] tipo completo para el dtor del mapa
 
 #include "helper.h"
 

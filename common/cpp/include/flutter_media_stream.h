@@ -23,6 +23,21 @@ class FlutterMediaStream {
 
   void GetSources(std::unique_ptr<MethodResultProxy> result);
 
+  // [chatpapol 48k] Crea una pista de audio kCustom (sin APM → sin downsample a
+  // 16k). Devuelve el track_info como getUserMedia; el PCM a 48k lo inyecta el
+  // capturador nativo (Stage 2) en custom_audio_sources_[track_id].
+  void CreateCustomAudioTrack(std::unique_ptr<MethodResultProxy> result);
+
+  // [chatpapol 48k — Stage 2] Arranca/para un capturador de micro nativo a 48k
+  // ligado a la fuente kCustom de `trackId` (custom_audio_sources_). `deviceId`
+  // vacío = micro por defecto. Sin APM -> sin AEC (auriculares obligatorios).
+  void StartCustomMicCapture(const std::string& track_id,
+                             const std::string& device_id,
+                             std::unique_ptr<MethodResultProxy> result);
+
+  void StopCustomMicCapture(const std::string& track_id,
+                            std::unique_ptr<MethodResultProxy> result);
+
   void SelectAudioOutput(const std::string& device_id,
                          std::unique_ptr<MethodResultProxy> result);
 

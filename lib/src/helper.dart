@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:logger/logger.dart';
 
 import '../flutter_webrtc.dart';
+import 'native/media_stream_impl.dart';  // [chatpapol 48k] MediaStreamNative
 import 'native_logs_listener.dart';
 
 class Helper {
@@ -191,5 +192,23 @@ class Helper {
       throw Exception(
           'requestCapturePermission only support for Android/macOS');
     }
+  }
+
+  /// [chatpapol 48k] Crea una pista de audio kCustom (fuente que NO pasa por el
+  /// APM → sin downsample a 16k) y devuelve el MediaStream real ya registrado en
+  /// el nativo, listo para envolver en un LocalAudioTrack de livekit. El PCM a
+  /// 48k lo inyecta el capturador nativo (startCustomMicCapture). Mismo patrón
+  /// que getUserMedia pero por el método 'createCustomAudioTrack' del fork.
+  /// Lanza si el build no soporta el método (flutter_webrtc estándar).
+  static Future<MediaStream> createCustomAudioStream() async {
+    final response = await WebRTC.invokeMethod('createCustomAudioTrack');
+    if (response == null) {
+      throw Exception('createCustomAudioTrack devolvió null');
+    }
+    final String streamId = response['streamId'];
+    final stream = MediaStreamNative(streamId, 'local');
+    stream.setMediaTracks(
+        response['audioTracks'] ?? [], response['videoTracks'] ?? []);
+    return stream;
   }
 }

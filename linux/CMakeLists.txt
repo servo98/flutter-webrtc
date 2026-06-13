@@ -53,6 +53,8 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_webrtc_base.cc"
   "../common/cpp/src/flutter_common.cc"
   "loopback_capturer_factory.cc"
+  "../common/cpp/src/mic_capturer_common.cc"
+  "mic_capturer_linux.cc"
   "flutter_webrtc_plugin.cc"
   "flutter/core_implementations.cc"
   "flutter/standard_codec.cc"
@@ -99,6 +101,18 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 )
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::GTK)
+
+# [chatpapol 48k — Stage 2] Captura de micro a 48k vía PulseAudio simple
+# (PipeWire la expone vía pipewire-pulse). Si no se encuentra, el capturador
+# Linux devuelve error en runtime (no rompe el build).
+pkg_check_modules(PULSE_SIMPLE IMPORTED_TARGET libpulse-simple)
+if(PULSE_SIMPLE_FOUND)
+  target_compile_definitions(${PLUGIN_NAME} PRIVATE CHATPAPOL_HAVE_PULSE)
+  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::PULSE_SIMPLE)
+else()
+  message(WARNING "[chatpapol] libpulse-simple no encontrado: el capturador de "
+                  "micro a 48k (Stage 2) quedará deshabilitado en Linux.")
+endif()
 
 
 target_link_libraries(${PLUGIN_NAME} PRIVATE 

@@ -117,6 +117,30 @@ void FlutterWebRTC::HandleMethodCall(
     }
   } else if (method_call.method_name().compare("getSources") == 0) {
     GetSources(std::move(result));
+  } else if (method_call.method_name().compare("createCustomAudioTrack") == 0) {
+    // [chatpapol 48k — Stage 1] pista de micro kCustom (sin APM/16k).
+    CreateCustomAudioTrack(std::move(result));
+  } else if (method_call.method_name().compare("startCustomMicCapture") == 0) {
+    // [chatpapol 48k — Stage 2] arranca el capturador de micro a 48k ligado a
+    // la pista kCustom creada por createCustomAudioTrack.
+    if (!method_call.arguments()) {
+      result->Error("Bad Arguments", "Null arguments received");
+      return;
+    }
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    const std::string trackId = findString(params, "trackId");
+    const std::string deviceId = findString(params, "deviceId");
+    StartCustomMicCapture(trackId, deviceId, std::move(result));
+  } else if (method_call.method_name().compare("stopCustomMicCapture") == 0) {
+    if (!method_call.arguments()) {
+      result->Error("Bad Arguments", "Null arguments received");
+      return;
+    }
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    const std::string trackId = findString(params, "trackId");
+    StopCustomMicCapture(trackId, std::move(result));
   } else if (method_call.method_name().compare("selectAudioInput") == 0) {
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());

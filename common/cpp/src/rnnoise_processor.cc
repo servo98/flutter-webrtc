@@ -177,6 +177,69 @@ void RnnoiseProcessor::Initialize(int sample_rate_hz, int num_channels) {
   fx_dirty_ = true;  // geometría cambió: recrear cadenas voicefx
 }
 
+// [chatpapol 48k] Inicializa el procesador para la ruta de micro kCustom:
+// 48 kHz mono, 1 motor RNNoise a 48k (su rate nativo => sin resample). Reutiliza
+// Initialize() con la geometría fija de la ruta custom.
+void RnnoiseProcessor::InitializeCustom48() {
+  Initialize(48000, 1);
+}
+
+// [chatpapol 48k] Procesa un bloque de [num_frames] muestras mono a 48 kHz
+// (escala FloatS16) IN-PLACE, fuera del APM:
+//   1) RNNoise sobre el buffer completo (48k nativo: sin resample).
+//   2) cadena voicefx creada a 48k (band_rate = 48000; sin cero de bandas
+//      altas porque no hay band-split: el buffer YA es fullband 48k).
+//   3) monitor 'escucharme' a 48k (EmitMonitorLocked abre waveOut a rate_).
+// Corre en el hilo de audio del capturador; mismo contrato realtime que Process.
+void RnnoiseProcessor::ProcessCustom48(float* data, int num_frames) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (num_frames <= 0 || data == nullptr) return;
+  // Defensa: si nunca se inicializó la geometría custom, hazlo aquí (48k/mono).
+  if (rate_ != 48000 || engines_.empty()) {
+    rate_ = 48000;
+    if (engines_.empty()) {
+      auto e = std::make_unique<RnnoiseEngine>();
+      e->Reset(48000);
+      engines_.push_back(std::move(e));
+      chans_ = 1;
+      fx_dirty_ = true;
+    }
+  }
+
+  // 1) RNNoise sobre el buffer 48k (canal 0). 48k nativo => sin resample 16k.
+  if (rnnoise_on_ && !engines_.empty() && engines_[0]) {
+    engines_[0]->ProcessInPlace(data, num_frames);
+  }
+
+  // 2) voicefx a 48k (sin band-split, sin memset de bandas altas).
+  const bool fx_active = fx_on_ && !fx_parsed_.empty();
+  if (fx_active) {
+    const int band_rate = 48000;
+    if (fx_dirty_ || fx_rate_ != band_rate || fx_frames_ < num_frames ||
+        fx_chains_.empty()) {
+      RebuildFxLocked(band_rate, num_frames);
+    }
+    if (static_cast<int>(fx_scratch_.size()) < num_frames) {
+      fx_scratch_.resize(num_frames);
+    }
+    if (!fx_chains_.empty() && fx_chains_[0]) {
+      VfxChain* ch = fx_chains_[0];
+      constexpr float kInv = 1.0f / 32768.0f;
+      for (int i = 0; i < num_frames; ++i) fx_scratch_[i] = data[i] * kInv;
+      vfx_process(ch, fx_scratch_.data(), fx_scratch_.data(), num_frames);
+      for (int i = 0; i < num_frames; ++i) {
+        float v = fx_scratch_[i] * 32768.0f;
+        if (v > 32767.0f) v = 32767.0f;
+        else if (v < -32768.0f) v = -32768.0f;
+        data[i] = v;
+      }
+    }
+  }
+
+  // 3) Monitor: el mismo buffer 48k ya procesado (rate_=48000 => waveOut 48k).
+  if (monitor_on_) EmitMonitorLocked(num_frames, data);
+}
+
 void RnnoiseProcessor::Reset(int new_rate) {
   std::lock_guard<std::mutex> lock(mu_);
   rate_ = new_rate;

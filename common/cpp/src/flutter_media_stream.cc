@@ -1,6 +1,7 @@
 #include "flutter_media_stream.h"
 
 #include "flutter_utf8_sanitize.h"
+#include "mic_capturer.h"  // [chatpapol 48k — Stage 2] capturador de micro nativo
 
 #define DEFAULT_WIDTH 1280
 #define DEFAULT_HEIGHT 720
@@ -78,6 +79,49 @@ void FlutterMediaStream::GetUserMedia(
   }
 
   base_->local_streams_[uuid] = stream;
+  result->Success(EncodableValue(params));
+}
+
+// [chatpapol 48k — Stage 1] Crea una pista de audio kCustom: igual que el track
+// del screenshare-con-audio (flutter_screen_capture), pero para el MICRO. La
+// fuente kCustom NO pasa por el APM (que baja a 16k); un capturador nativo
+// (Stage 2) le inyectará PCM a 48 kHz por custom_audio_sources_[track_id]
+// ->CaptureFrame. AEC/NS/AGC off (sin APM no hay AEC: requiere auriculares).
+void FlutterMediaStream::CreateCustomAudioTrack(
+    std::unique_ptr<MethodResultProxy> result) {
+  std::string streamId = base_->GenerateUUID();
+  scoped_refptr<RTCMediaStream> stream =
+      base_->factory_->CreateStream(streamId.c_str());
+
+  RTCAudioOptions opts;
+  opts.echo_cancellation = false;
+  opts.auto_gain_control = false;
+  opts.noise_suppression = false;
+  std::string label = "custom_mic_" + base_->GenerateUUID();
+  scoped_refptr<RTCAudioSource> source = base_->factory_->CreateAudioSource(
+      label.c_str(), RTCAudioSource::SourceType::kCustom, opts);
+  std::string uuid = base_->GenerateUUID();
+  scoped_refptr<RTCAudioTrack> track =
+      base_->factory_->CreateAudioTrack(source, uuid.c_str());
+  std::string track_id = track->id().std_string();
+
+  EncodableMap track_info;
+  track_info[EncodableValue("id")] = EncodableValue(track_id);
+  track_info[EncodableValue("label")] = EncodableValue(track_id);
+  track_info[EncodableValue("kind")] = EncodableValue(track->kind().std_string());
+  track_info[EncodableValue("enabled")] = EncodableValue(track->enabled());
+
+  EncodableList audioTracks;
+  audioTracks.push_back(EncodableValue(track_info));
+  EncodableMap params;
+  params[EncodableValue("streamId")] = EncodableValue(streamId);
+  params[EncodableValue("audioTracks")] = EncodableValue(audioTracks);
+
+  stream->AddTrack(track);
+  base_->local_streams_[streamId] = stream;
+  base_->local_tracks_[track_id] = track;
+  base_->custom_audio_sources_[track_id] = source;
+
   result->Success(EncodableValue(params));
 }
 
@@ -664,7 +708,63 @@ void FlutterMediaStream::MediaStreamTrackDispose(
       }
     }
   }
+  // [chatpapol 48k — Stage 2] Si esta pista tenía un capturador de micro 48k,
+  // páralo ANTES de soltar la fuente (orden de teardown correcto).
+  {
+    auto mic_it = base_->custom_mic_capturers_.find(track_id);
+    if (mic_it != base_->custom_mic_capturers_.end()) {
+      if (mic_it->second) mic_it->second->Stop();
+      base_->custom_mic_capturers_.erase(mic_it);
+    }
+    base_->custom_audio_sources_.erase(track_id);
+  }
   base_->RemoveMediaTrackForId(track_id);
+  result->Success();
+}
+
+// [chatpapol 48k — Stage 2] Arranca un capturador de micro nativo a 48k y lo
+// liga a la fuente kCustom de track_id (creada por CreateCustomAudioTrack). El
+// procesador RNNoise/voicefx/monitor a 48k se engancha en el FeederTick.
+void FlutterMediaStream::StartCustomMicCapture(
+    const std::string& track_id,
+    const std::string& device_id,
+    std::unique_ptr<MethodResultProxy> result) {
+  auto src_it = base_->custom_audio_sources_.find(track_id);
+  if (src_it == base_->custom_audio_sources_.end() || !src_it->second) {
+    result->Error("CustomMicCapture",
+                  "No custom audio source for track " + track_id +
+                      " (call createCustomAudioTrack first)");
+    return;
+  }
+
+  // Si ya había un capturador para este track, páralo y reemplázalo.
+  auto existing = base_->custom_mic_capturers_.find(track_id);
+  if (existing != base_->custom_mic_capturers_.end()) {
+    if (existing->second) existing->second->Stop();
+    base_->custom_mic_capturers_.erase(existing);
+  }
+
+  auto capturer = std::make_unique<MicCapturer>();
+  capturer->SetFxProcessor(base_->rnnoise_processor());  // RNNoise/voicefx/monitor 48k
+  if (!capturer->Start(src_it->second, device_id)) {
+    result->Error("CustomMicCapture",
+                  "Failed to start native mic capturer for device '" +
+                      device_id + "'");
+    return;
+  }
+  base_->custom_mic_capturers_[track_id] = std::move(capturer);
+  result->Success();
+}
+
+// [chatpapol 48k — Stage 2] Para y libera el capturador de micro. Idempotente.
+void FlutterMediaStream::StopCustomMicCapture(
+    const std::string& track_id,
+    std::unique_ptr<MethodResultProxy> result) {
+  auto it = base_->custom_mic_capturers_.find(track_id);
+  if (it != base_->custom_mic_capturers_.end()) {
+    if (it->second) it->second->Stop();
+    base_->custom_mic_capturers_.erase(it);
+  }
   result->Success();
 }
 }  // namespace flutter_webrtc_plugin
