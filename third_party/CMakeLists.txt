@@ -114,6 +114,17 @@ function(_libwebrtc_extract_and_normalize zip_path dest_dir)
   file(REMOVE_RECURSE "${_staging}")
 endfunction()
 
+# [chatpapol] Marca de presencia: la lib del OS ACTUAL, no solo el dir. Si se
+# alterna entre builds Windows/Linux con el MISMO fork local, el dir libwebrtc/
+# puede quedar con la lib del OTRO OS (p.ej. .so de Linux) y el build de Windows
+# fallaría en el link buscando libwebrtc.dll.lib. Comprobar la lib del OS fuerza
+# re-extraer del zip cacheado cuando el dir tiene el OS equivocado.
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+  set(_libwebrtc_marker "${CMAKE_CURRENT_LIST_DIR}/libwebrtc/lib/libwebrtc.dll.lib")
+else()
+  set(_libwebrtc_marker "${CMAKE_CURRENT_LIST_DIR}/libwebrtc/lib/libwebrtc.so")
+endif()
+
 if(NOT EXISTS "${ZIPFILE}")
   message(NOTICE "download: ${DOWNLOAD_URL}")
   file(DOWNLOAD "${DOWNLOAD_URL}"
@@ -126,10 +137,9 @@ if(NOT EXISTS "${ZIPFILE}")
   endif()
 
   _libwebrtc_extract_and_normalize("${ZIPFILE}" "${CMAKE_CURRENT_LIST_DIR}")
+elseif(NOT EXISTS "${_libwebrtc_marker}")
+  message(NOTICE "libwebrtc: re-extrayendo para ${CMAKE_SYSTEM_NAME} (lib del OS ausente en el dir).")
+  _libwebrtc_extract_and_normalize("${ZIPFILE}" "${CMAKE_CURRENT_LIST_DIR}")
 else()
-  if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/libwebrtc")
-    message(NOTICE "libwebrtc directory does not exist after extraction.")
-    _libwebrtc_extract_and_normalize("${ZIPFILE}" "${CMAKE_CURRENT_LIST_DIR}")
-  endif()
-  message(TRACE "libwebrtc already downloaded.")
+  message(TRACE "libwebrtc already present for ${CMAKE_SYSTEM_NAME}.")
 endif()

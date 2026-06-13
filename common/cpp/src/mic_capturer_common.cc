@@ -16,6 +16,16 @@
 #include <chrono>
 #include <cstring>
 
+#ifdef _WIN32
+// [chatpapol 48k] timing preciso del feeder en Windows: waitable timer (10 ms) +
+// timeBeginPeriod + prioridad de audio MMCSS. Sin esto, sleep_until tickea a
+// ~15.6 ms (resolución por defecto del SO) → el feeder entrega ~64 fps en vez de
+// 100 → underrun constante → audio CORTADO. Mismo patrón que el loopback WASAPI.
+#include <windows.h>
+#include <avrt.h>
+#include <timeapi.h>
+#endif
+
 namespace flutter_webrtc_plugin {
 
 void MicCapturer::RingWrite(const int16_t* samples, size_t num_frames) {
@@ -46,9 +56,8 @@ size_t MicCapturer::RingRead(int16_t* out, size_t want_frames) {
 }
 
 void MicCapturer::FeederTick() {
-  // Rellena `feed_` con 10 ms del ring (zeros si no hay suficiente).
-  std::fill(feed_.begin(), feed_.end(), int16_t{0});
-  RingRead(feed_.data(), kMicFramesPer10ms);
+  // `feed_` ya viene relleno con 10 ms del ring (lo lee FeederThread bajo su
+  // lógica de prebuffer/drift/cap). Aquí solo procesamos y empujamos.
 
   // [chatpapol 48k — Stage 4] Procesado a 48k FUERA del APM (escala FloatS16,
   // NO normalizar): int16 -> float [-32768,32767], ProcessCustom48 hace RNNoise
@@ -78,28 +87,53 @@ void MicCapturer::FeederTick() {
 void MicCapturer::FeederThread() {
   using Clock = std::chrono::steady_clock;
 
-  const size_t target_prebuf = 8 * kMicFramesPer10ms;   // 80 ms de arranque
+  // Prebuffer 160 ms (igual que el loopback probado): más tolerancia al jitter
+  // de la captura WASAPI/Pulse que los 80 ms anteriores (que se quedaban cortos
+  // → underrun → cortes).
+  const size_t target_prebuf = 16 * kMicFramesPer10ms;  // 160 ms de arranque
   const size_t max_buffered = 20 * kMicFramesPer10ms;   // 200 ms tope duro
-
-  // Espera a pre-buffer (o a que paren).
-  while (running_.load()) {
-    {
-      std::lock_guard<std::mutex> lock(ring_mutex_);
-      if (ring_frames_avail_ >= target_prebuf) break;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-  }
-
-  auto feeder_start = Clock::now();
+  bool prebuffering = true;
+  bool feeder_start_valid = false;
   int64_t total_frames_del = 0;
+  auto feeder_start = Clock::now();
+
+#ifdef _WIN32
+  // Timing preciso (ver includes): MMCSS + timeBeginPeriod + waitable timer 10ms.
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  DWORD task_index = 0;
+  HANDLE task = AvSetMmThreadCharacteristicsW(L"Audio", &task_index);
+  timeBeginPeriod(10);
+  HANDLE timer = CreateWaitableTimerW(nullptr, /*manualReset=*/FALSE, nullptr);
+  LARGE_INTEGER due = {};
+  due.QuadPart = -100000LL;  // 10 ms inicial (unidades de 100 ns)
+  SetWaitableTimer(timer, &due, /*period_ms=*/10, nullptr, nullptr, FALSE);
+#else
   auto next_tick = Clock::now();
+#endif
 
   while (running_.load()) {
+#ifdef _WIN32
+    if (WaitForSingleObject(timer, /*timeout_ms=*/40) == WAIT_FAILED) break;
+#else
     next_tick += std::chrono::milliseconds(10);
     std::this_thread::sleep_until(next_tick);
+#endif
     if (!running_.load()) break;
 
-    // Tope duro: recorta lo más viejo para no pasar de 200 ms de latencia.
+    // Drift: si vamos más de un frame por delante de tiempo real, salta el tick
+    // para mantener el ritmo nominal (no sobrellenar el jitter buffer del rx).
+    if (feeder_start_valid) {
+      const double elapsed_sec =
+          std::chrono::duration<double>(Clock::now() - feeder_start).count();
+      const int64_t expected =
+          static_cast<int64_t>(elapsed_sec * kMicSampleRate);
+      if (total_frames_del >
+          expected + static_cast<int64_t>(kMicFramesPer10ms)) {
+        continue;
+      }
+    }
+
+    // Tope duro + prebuffer bajo el lock.
     {
       std::lock_guard<std::mutex> lock(ring_mutex_);
       if (ring_frames_avail_ > max_buffered) {
@@ -107,22 +141,31 @@ void MicCapturer::FeederThread() {
         ring_read_frame_ = (ring_read_frame_ + drop) % ring_capacity_frames_;
         ring_frames_avail_ -= drop;
       }
+      if (prebuffering) {
+        if (ring_frames_avail_ >= target_prebuf) {
+          prebuffering = false;
+          feeder_start = Clock::now();  // arranca el reloj de drift AHORA
+          feeder_start_valid = true;
+        } else {
+          continue;  // aún acumulando: no empujar todavía
+        }
+      }
     }
 
-    // Drift: si vamos más de un frame por delante de tiempo real, salta el tick
-    // (no consumir ring, no CaptureFrame) para mantener el ritmo nominal.
-    const double elapsed_sec =
-        std::chrono::duration<double>(Clock::now() - feeder_start).count();
-    const int64_t expected =
-        static_cast<int64_t>(elapsed_sec * kMicSampleRate);
-    if (total_frames_del >
-        expected + static_cast<int64_t>(kMicFramesPer10ms)) {
-      continue;
-    }
-
+    // Lee 10 ms del ring (zeros si no hay suficiente) y procesa+empuja.
+    std::fill(feed_.begin(), feed_.end(), int16_t{0});
+    RingRead(feed_.data(), kMicFramesPer10ms);
     FeederTick();
     total_frames_del += static_cast<int64_t>(kMicFramesPer10ms);
   }
+
+#ifdef _WIN32
+  CancelWaitableTimer(timer);
+  CloseHandle(timer);
+  timeEndPeriod(10);
+  if (task) AvRevertMmThreadCharacteristics(task);
+  CoUninitialize();
+#endif
 }
 
 }  // namespace flutter_webrtc_plugin
