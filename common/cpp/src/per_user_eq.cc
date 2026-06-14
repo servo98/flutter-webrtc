@@ -48,13 +48,10 @@ static void chatpapol_eq_probe_log(const char* line) {
 namespace chatpapol {
 
 namespace {
-// Bandas del EQ por-usuario (fijas; el usuario solo controla la ganancia dB):
-//   GRAVES  → low-shelf a 250 Hz
-//   MEDIOS  → peaking  a 1000 Hz
-//   AGUDOS  → high-shelf a 6000 Hz
-constexpr float kFreqBass = 250.0f;
-constexpr float kFreqMid = 1000.0f;
-constexpr float kFreqTreble = 6000.0f;
+// Bandas del EQ por-usuario (8, fijas; el usuario controla la ganancia dB de c/u).
+// Banda 0 = low-shelf, 1..6 = peaking, 7 = high-shelf. Espaciado ~1 octava.
+constexpr float kEqFreqs[PerUserEqSink::kBands] = {
+    60.0f, 120.0f, 250.0f, 500.0f, 1000.0f, 2400.0f, 6000.0f, 12000.0f};
 constexpr float kInv16 = 1.0f / 32768.0f;
 
 inline float ClampDb(float db) {
@@ -65,7 +62,10 @@ inline float ClampDb(float db) {
 }  // namespace
 
 PerUserEqSink::PerUserEqSink(std::string trackId)
-    : track_id_(std::move(trackId)) {}
+    : track_id_(std::move(trackId)) {
+  for (int i = 0; i < kBands; ++i)
+    gains_[i].store(0.0f, std::memory_order_relaxed);  // atomic<float> no auto-init
+}
 
 PerUserEqSink::~PerUserEqSink() {
   // El caller garantiza RemoveSink ANTES de destruir → no hay OnData en vuelo.
@@ -76,10 +76,11 @@ PerUserEqSink::~PerUserEqSink() {
   // out_ (unique_ptr<WaveOutPlayer>) se destruye solo → cierra waveOut.
 }
 
-void PerUserEqSink::SetEq(float bassDb, float midDb, float trebleDb) {
-  bass_db_.store(ClampDb(bassDb), std::memory_order_relaxed);
-  mid_db_.store(ClampDb(midDb), std::memory_order_relaxed);
-  treble_db_.store(ClampDb(trebleDb), std::memory_order_relaxed);
+void PerUserEqSink::SetEq(const std::vector<float>& gainsDb) {
+  for (int i = 0; i < kBands; ++i) {
+    const float g = i < static_cast<int>(gainsDb.size()) ? ClampDb(gainsDb[i]) : 0.0f;
+    gains_[i].store(g, std::memory_order_relaxed);
+  }
   params_dirty_.store(true, std::memory_order_release);
 }
 
@@ -107,24 +108,17 @@ void PerUserEqSink::EnsureChainAudioThread(int rate, int max_frames) {
   if (!chain_) return;
   vfx_clear(chain_);
   vfx_set_master(chain_, 1.0f, 1.0f);  // wet=1, gain lo aplicamos nosotros aparte
-  // nodo 0: GRAVES (low-shelf)
-  int n0 = vfx_add(chain_, VFX_BIQUAD);
-  if (n0 >= 0) {
-    vfx_set_param(chain_, n0, VFX_P_BIQUAD_TYPE, (float)VFX_BIQUAD_LOWSHELF);
-    vfx_set_param(chain_, n0, VFX_P_BIQUAD_FREQ, kFreqBass);
-  }
-  // nodo 1: MEDIOS (peaking)
-  int n1 = vfx_add(chain_, VFX_BIQUAD);
-  if (n1 >= 0) {
-    vfx_set_param(chain_, n1, VFX_P_BIQUAD_TYPE, (float)VFX_BIQUAD_PEAKING);
-    vfx_set_param(chain_, n1, VFX_P_BIQUAD_FREQ, kFreqMid);
-    vfx_set_param(chain_, n1, VFX_P_BIQUAD_Q, 0.9f);
-  }
-  // nodo 2: AGUDOS (high-shelf)
-  int n2 = vfx_add(chain_, VFX_BIQUAD);
-  if (n2 >= 0) {
-    vfx_set_param(chain_, n2, VFX_P_BIQUAD_TYPE, (float)VFX_BIQUAD_HIGHSHELF);
-    vfx_set_param(chain_, n2, VFX_P_BIQUAD_FREQ, kFreqTreble);
+  // 8 nodos: banda 0 = low-shelf, 1..6 = peaking (Q~1.1, ~1 octava), 7 = high-shelf.
+  for (int i = 0; i < kBands; ++i) {
+    int n = vfx_add(chain_, VFX_BIQUAD);
+    if (n < 0) break;  // tope VFX_MAX_NODES (16): 8 caben de sobra
+    const int type = (i == 0)            ? VFX_BIQUAD_LOWSHELF
+                     : (i == kBands - 1) ? VFX_BIQUAD_HIGHSHELF
+                                         : VFX_BIQUAD_PEAKING;
+    vfx_set_param(chain_, n, VFX_P_BIQUAD_TYPE, (float)type);
+    vfx_set_param(chain_, n, VFX_P_BIQUAD_FREQ, kEqFreqs[i]);
+    if (type == VFX_BIQUAD_PEAKING)
+      vfx_set_param(chain_, n, VFX_P_BIQUAD_Q, 1.1f);
   }
   chain_rate_ = sr;
   chain_frames_ = mf;
@@ -193,12 +187,9 @@ void PerUserEqSink::OnData(const void* audio_data, int bits_per_sample,
     // vfx_set_param es seguro concurrente con vfx_process (ABI), y aquí ni
     // siquiera hay concurrencia: mismo hilo de audio.
     if (params_dirty_.exchange(false, std::memory_order_acquire)) {
-      vfx_set_param(chain_, 0, VFX_P_BIQUAD_GAIN_DB,
-                    bass_db_.load(std::memory_order_relaxed));
-      vfx_set_param(chain_, 1, VFX_P_BIQUAD_GAIN_DB,
-                    mid_db_.load(std::memory_order_relaxed));
-      vfx_set_param(chain_, 2, VFX_P_BIQUAD_GAIN_DB,
-                    treble_db_.load(std::memory_order_relaxed));
+      for (int i = 0; i < kBands; ++i)
+        vfx_set_param(chain_, i, VFX_P_BIQUAD_GAIN_DB,
+                      gains_[i].load(std::memory_order_relaxed));
     }
     vfx_process(chain_, mono_.data(), mono_.data(), frames);
   }

@@ -1430,9 +1430,14 @@ void FlutterWebRTC::HandleMethodCall(
       result->Error("setUserEq", "setUserEq() Empty track provided");
       return;
     }
-    const double bass = maybeFindDouble(params, "bassDb").value_or(0.0);
-    const double mid = maybeFindDouble(params, "midDb").value_or(0.0);
-    const double treb = maybeFindDouble(params, "trebleDb").value_or(0.0);
+    std::vector<float> eqGains;  // N bandas (8) de ganancia en dB
+    auto gainsIt = params.find(EncodableValue("gains"));
+    if (gainsIt != params.end()) {
+      const EncodableList& list = GetValue<EncodableList>(gainsIt->second);
+      eqGains.reserve(list.size());
+      for (const auto& e : list)
+        eqGains.push_back(static_cast<float>(GetValue<double>(e)));
+    }
     const double gain = maybeFindDouble(params, "gain").value_or(1.0);
 
     RTCMediaTrack* track = MediaTrackForId(trackId);
@@ -1448,7 +1453,7 @@ void FlutterWebRTC::HandleMethodCall(
     auto* router = per_user_eq();
     const bool isNew = (router->Find(trackId) == nullptr);
     auto* sink = router->GetOrCreate(trackId);
-    sink->SetEq((float)bass, (float)mid, (float)treb);
+    sink->SetEq(eqGains);
     sink->SetGain((float)gain);
     if (isNew) {
       // ORDEN: primero capturamos el PCM, luego silenciamos el playout nativo.

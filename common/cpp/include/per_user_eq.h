@@ -65,7 +65,8 @@ class PerUserEqSink : public libwebrtc::AudioTrackSink {
               size_t number_of_channels, size_t number_of_frames) override;
 
   // --- hilo de control (plataforma) ---
-  void SetEq(float bassDb, float midDb, float trebleDb);  // -12..+12 dB
+  static constexpr int kBands = 8;  // EQ de 8 bandas (freqs fijas en el .cc)
+  void SetEq(const std::vector<float>& gainsDb);  // kBands valores, -12..+12 dB
   void SetGain(float gainLinear);                          // 0..~4 (outVol*userVol)
 
  private:
@@ -76,9 +77,7 @@ class PerUserEqSink : public libwebrtc::AudioTrackSink {
   // Parámetros: el control thread escribe atómicos; el audio thread los lee y
   // los empuja a la chain con vfx_set_param (ABI: seguro concurrente con
   // vfx_process). dirty_ marca que hay cambios pendientes de aplicar a la chain.
-  std::atomic<float> bass_db_{0.0f};
-  std::atomic<float> mid_db_{0.0f};
-  std::atomic<float> treble_db_{0.0f};
+  std::atomic<float> gains_[kBands];  // ganancia por banda (dB); init 0 en el ctor
   std::atomic<float> gain_{1.0f};
   std::atomic<bool> params_dirty_{true};
 
