@@ -209,9 +209,11 @@ void RnnoiseProcessor::Initialize(int sample_rate_hz, int num_channels) {
 // Initialize() con la geometría fija de la ruta custom.
 void RnnoiseProcessor::InitializeCustom48() {
   Initialize(48000, 1);
-  // Resetea el supresor espectral para no arrastrar estado (mínimos/envolventes)
-  // de una captura anterior → sin corte al arrancar.
+  // Resetea el supresor espectral y el AGC para no arrastrar estado de una
+  // captura anterior → sin corte ni salto de ganancia al arrancar.
   ns48_.Reset();
+  agc_gain_ = 1.0f;
+  agc_env_ = 0.0f;
 }
 
 // [chatpapol 48k] Procesa un bloque de [num_frames] muestras mono a 48 kHz
@@ -247,7 +249,7 @@ void RnnoiseProcessor::ProcessCustom48(float* data, int num_frames) {
   // incluso sin filtros": el viejo AGC+gate se aplicaba SIEMPRE (machacaba el
   // audio aunque todo estuviera off). Ahora, sin procesado, el audio pasa intacto.
   if (input_gain_ == 1.0f && ns_level_ <= 0 && !fx_active && !monitor_on_ &&
-      !dump_on_) {
+      !dump_on_ && !agc_on_) {
     return;
   }
 
@@ -286,12 +288,31 @@ void RnnoiseProcessor::ProcessCustom48(float* data, int num_frames) {
     }
   }
 
-  // 3) Ganancia (boost) + LIMITADOR suave como ÚLTIMA etapa. La ganancia va
-  //    aquí (tras limpiar/efectos) y el limitador (soft-knee con tanh sobre el
-  //    85% de escala) evita el clipping duro que "truena". Corre siempre (cuando
-  //    algo está activo) para atrapar también los picos de NS/efectos.
+  // 2.5) AGC: auto-nivelado LENTO (post-limpieza, pre-limitador). Sigue el pico
+  //    suavizado del bloque y ajusta la ganancia hacia un objetivo SOLO cuando
+  //    hay señal (sobre el piso de ruido). Slew muy lento = sin bombeo; tope
+  //    +18 dB; nunca atenúa (de eso se encarga el limitador). Esto sube tu voz a
+  //    un nivel consistente (como Discord); el 48k no pasa por el AGC del APM.
+  if (agc_on_) {
+    float peak = 0.0f;
+    for (int i = 0; i < num_frames; ++i) {
+      const float a = data[i] < 0 ? -data[i] : data[i];
+      if (a > peak) peak = a;
+    }
+    agc_env_ += (peak - agc_env_) * (peak > agc_env_ ? 0.15f : 0.03f);
+    if (agc_env_ > 250.0f) {  // ~−42 dBFS: hay voz, no solo ruido
+      float desired = 18000.0f / agc_env_;  // objetivo de pico ~−5 dBFS
+      if (desired > 8.0f) desired = 8.0f;   // tope +18 dB
+      if (desired < 1.0f) desired = 1.0f;   // no atenuar (el limitador corta picos)
+      agc_gain_ += (desired - agc_gain_) * (desired < agc_gain_ ? 0.02f : 0.01f);
+    }
+  }
+
+  // 3) Ganancia (boost manual × AGC) + LIMITADOR suave como ÚLTIMA etapa. El
+  //    limitador (soft-knee con tanh sobre el 85% de escala) evita el clipping
+  //    duro que "truena". Corre siempre (cuando algo está activo).
   {
-    const float g = input_gain_;
+    const float g = input_gain_ * (agc_on_ ? agc_gain_ : 1.0f);
     constexpr float kCeil = 32767.0f;
     constexpr float kKnee = 0.85f * kCeil;
     for (int i = 0; i < num_frames; ++i) {
@@ -415,6 +436,15 @@ void RnnoiseProcessor::SetNsLevel(int level) {
   if (level < 0) level = 0;
   if (level > 2) level = 2;
   ns_level_ = level;
+}
+
+void RnnoiseProcessor::SetAgc(bool on) {
+  std::lock_guard<std::mutex> lock(mu_);
+  agc_on_ = on;
+  if (!on) {
+    agc_gain_ = 1.0f;
+    agc_env_ = 0.0f;
+  }
 }
 
 void RnnoiseProcessor::SetVoiceFx(bool enabled, const std::string& spec) {

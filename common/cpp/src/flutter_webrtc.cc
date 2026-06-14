@@ -1408,6 +1408,17 @@ void FlutterWebRTC::HandleMethodCall(
     if (it != params.end()) level = GetValue<int>(it->second);
     rnnoise_processor()->SetNsLevel(level);
     result->Success();
+  } else if (method_call.method_name().compare("setAgc48") == 0) {
+    // [chatpapol] auto-nivelado del path 48k (on/off).
+    bool on = true;
+    if (method_call.arguments()) {
+      const EncodableMap params =
+          GetValue<EncodableMap>(*method_call.arguments());
+      auto it = params.find(EncodableValue("on"));
+      if (it != params.end()) on = GetValue<bool>(it->second);
+    }
+    rnnoise_processor()->SetAgc(on);
+    result->Success();
   } else if (method_call.method_name().compare("startMicDump") == 0) {
     // [chatpapol diag] graba el micro (crudo vs procesado) a .wav en 'dir'.
     // Instala el procesador para que Process() corra y capture.

@@ -77,6 +77,10 @@ class RnnoiseProcessor
   // [chatpapol] Nivel del supresor espectral del path 48k: 0=off, 1=estándar,
   // 2=fuerte. Reemplaza al viejo gate+AGC. (El path 16k sigue usando RNNoise.)
   void SetNsLevel(int level);
+  // [chatpapol] Auto-nivelado (AGC) del path 48k: sube tu voz a un nivel
+  // consistente (como Discord). El 48k no pasa por el AGC del APM. Lento, tras
+  // limpiar, con el limitador atrapando picos. Apagable.
+  void SetAgc(bool on);
   // [chatpapol diag] Graba el micro a .wav por etapas (crudo / procesado) en
   // [dir] para diagnosticar el audio con datos reales. StopDump escribe los
   // archivos. Mientras graba, active() es true (fuerza que Process() corra).
@@ -126,6 +130,10 @@ class RnnoiseProcessor
   float input_gain_ = 1.0f;   // multiplicador de captura (1.0 = sin cambio)
   int ns_level_ = 1;          // 0 off · 1 estándar · 2 fuerte
   SpectralDenoiser ns48_;     // supresor espectral del path 48k
+  // Auto-nivelado (AGC) del path 48k: lento, tras limpiar, pre-limitador.
+  bool agc_on_ = true;
+  float agc_gain_ = 1.0f;     // ganancia aplicada (slew lento)
+  float agc_env_ = 0.0f;      // envolvente de pico (seguimiento del nivel)
 
   // [chatpapol diag] grabación de diagnóstico (crudo vs procesado) a .wav.
   bool dump_on_ = false;
