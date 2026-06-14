@@ -182,6 +182,9 @@ void RnnoiseProcessor::Initialize(int sample_rate_hz, int num_channels) {
 // Initialize() con la geometría fija de la ruta custom.
 void RnnoiseProcessor::InitializeCustom48() {
   Initialize(48000, 1);
+  // Resetea el supresor espectral para no arrastrar estado (mínimos/envolventes)
+  // de una captura anterior → sin corte al arrancar.
+  ns48_.Reset();
 }
 
 // [chatpapol 48k] Procesa un bloque de [num_frames] muestras mono a 48 kHz
@@ -206,56 +209,31 @@ void RnnoiseProcessor::ProcessCustom48(float* data, int num_frames) {
     }
   }
 
-  // Nivel de pico del bloque (escala int16), base del gate y del AGC.
-  float peak = 0.0f;
-  for (int i = 0; i < num_frames; ++i) {
-    const float a = data[i] < 0 ? -data[i] : data[i];
-    if (a > peak) peak = a;
-  }
+  const bool fx_active = fx_on_ && !fx_parsed_.empty();
+  // Passthrough BIT-EXACT cuando no hay NADA activo. Arregla "el 48k falla
+  // incluso sin filtros": el viejo AGC+gate se aplicaba SIEMPRE (machacaba el
+  // audio aunque todo estuviera off). Ahora, sin procesado, el audio pasa intacto.
+  if (input_gain_ == 1.0f && ns_level_ <= 0 && !fx_active && !monitor_on_) return;
 
-  // 1) NOISE GATE adaptativo (la "reducción de ruido" del path 48k). RNNoise a
-  // 48k fullband AGACHA la voz (se oye cortada); en su lugar usamos un gate de
-  // verdad: la voz (fuerte) pasa INTACTA y solo se atenúa el ruido en los
-  // SILENCIOS. Threshold ADAPTATIVO = sigue el piso de ruido real (sin número
-  // mágico). Abre rápido (no corta inicios), cierra lento (cola natural).
-  // Se calcula sobre la señal CRUDA (antes del AGC, donde voz>>ruido de verdad).
-  float gate_g = 1.0f;
-  if (rnnoise_on_) {
-    gate_env_ += (peak - gate_env_) * (peak > gate_env_ ? 0.5f : 0.05f);
-    // piso de ruido: baja rápido al mínimo reciente, sube muy lento.
-    if (gate_env_ < gate_floor_) {
-      gate_floor_ += (gate_env_ - gate_floor_) * 0.3f;
-    } else {
-      gate_floor_ += (gate_env_ - gate_floor_) * 0.0005f;
+  // 1) Boost de captura (volumen de entrada). El path kCustom no pasa por el AGC
+  //    del APM; el usuario sube su nivel aquí. Hard-clamp de seguridad.
+  if (input_gain_ != 1.0f) {
+    for (int i = 0; i < num_frames; ++i) {
+      float v = data[i] * input_gain_;
+      if (v > 32767.0f) v = 32767.0f;
+      else if (v < -32768.0f) v = -32768.0f;
+      data[i] = v;
     }
-    if (gate_floor_ < 30.0f) gate_floor_ = 30.0f;
-    const float thresh = gate_floor_ * 3.0f;  // ~ +9.5 dB sobre el ruido
-    const float target = gate_env_ > thresh ? 1.0f : 0.10f;  // abre / piso -20dB
-    gate_gain_ += (target - gate_gain_) * (target > gate_gain_ ? 0.4f : 0.03f);
-    gate_g = gate_gain_;
   }
 
-  // 2) AGC: sube el nivel (el path custom no pasa por el AGC del APM → micro
-  // bajo). Solo ADAPTA cuando el gate está abierto (hay voz), así no amplifica
-  // el ruido en los silencios. Aplica la ganancia siempre. Tope +18 dB.
-  const bool agc_adapt = !rnnoise_on_ || gate_gain_ > 0.5f;
-  if (agc_adapt) {
-    float desired = peak > 1.0f ? 9000.0f / peak : 8.0f;
-    if (desired > 8.0f) desired = 8.0f;
-    if (desired < 1.0f) desired = 1.0f;
-    agc_gain_ += (desired - agc_gain_) * (desired < agc_gain_ ? 0.5f : 0.02f);
-  }
-
-  // 3) aplica AGC * gate, con clamp.
-  for (int i = 0; i < num_frames; ++i) {
-    float v = data[i] * agc_gain_ * gate_g;
-    if (v > 32767.0f) v = 32767.0f;
-    else if (v < -32768.0f) v = -32768.0f;
-    data[i] = v;
-  }
+  // 2) Supresión de ruido ESPECTRAL propia (Wiener + MCRA, ver spectral_ns.cc).
+  //    Limpia el ruido DURANTE el habla SIN agachar la voz (a diferencia del
+  //    viejo gate, que solo cortaba silencios). num_frames debe ser 480 (hop);
+  //    si no, Process() es no-op seguro.
+  ns48_.SetLevel(ns_level_);
+  if (ns_level_ > 0) ns48_.Process(data, num_frames);
 
   // 3) voicefx a 48k (sin band-split, sin memset de bandas altas).
-  const bool fx_active = fx_on_ && !fx_parsed_.empty();
   if (fx_active) {
     const int band_rate = 48000;
     if (fx_dirty_ || fx_rate_ != band_rate || fx_frames_ < num_frames ||
@@ -365,6 +343,20 @@ void RnnoiseProcessor::Release() {
 void RnnoiseProcessor::SetRnnoise(bool on) {
   std::lock_guard<std::mutex> lock(mu_);
   rnnoise_on_ = on;
+}
+
+void RnnoiseProcessor::SetInputGain(float gain) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (gain < 0.0f) gain = 0.0f;
+  if (gain > 4.0f) gain = 4.0f;  // tope de seguridad
+  input_gain_ = gain;
+}
+
+void RnnoiseProcessor::SetNsLevel(int level) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (level < 0) level = 0;
+  if (level > 2) level = 2;
+  ns_level_ = level;
 }
 
 void RnnoiseProcessor::SetVoiceFx(bool enabled, const std::string& spec) {

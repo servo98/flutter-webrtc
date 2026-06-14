@@ -745,7 +745,10 @@ void FlutterMediaStream::StartCustomMicCapture(
   }
 
   auto capturer = std::make_unique<MicCapturer>();
-  capturer->SetFxProcessor(base_->rnnoise_processor());  // RNNoise/voicefx/monitor 48k
+  // Prepara la geometría 48k y RESETEA el supresor espectral (mínimos/envolventes)
+  // para no arrastrar estado de una captura anterior → sin corte al arrancar.
+  if (base_->rnnoise_processor()) base_->rnnoise_processor()->InitializeCustom48();
+  capturer->SetFxProcessor(base_->rnnoise_processor());  // NS espectral/voicefx/monitor 48k
   if (!capturer->Start(src_it->second, device_id)) {
     result->Error("CustomMicCapture",
                   "Failed to start native mic capturer for device '" +

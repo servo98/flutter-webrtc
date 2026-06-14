@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "rnnoise_engine.h"
+#include "spectral_ns.h"  // [chatpapol] supresor espectral propio (path 48k)
 #include "rtc_audio_processing.h"  // libwebrtc::RTCAudioProcessing::CustomProcessing
 
 // Handle opaco de voicefx, forward-declarado: así este header PÚBLICO no arrastra
@@ -69,6 +70,13 @@ class RnnoiseProcessor
   // altavoces locales (solo suena mientras hay captura, p.ej. en un canal de
   // voz). Solo Windows por ahora; no-op en otras plataformas.
   void SetMonitor(bool on);
+  // [chatpapol] Boost de captura (volumen de entrada): multiplicador lineal del
+  // micro, 0..~3 (1.0 = sin cambio). Lo controla el usuario; reemplaza al AGC
+  // siempre-on del path 48k. Se aplica con soft-clip para no reventar.
+  void SetInputGain(float gain);
+  // [chatpapol] Nivel del supresor espectral del path 48k: 0=off, 1=estándar,
+  // 2=fuerte. Reemplaza al viejo gate+AGC. (El path 16k sigue usando RNNoise.)
+  void SetNsLevel(int level);
   bool active();  // ¿hay algo que procesar? (para registrar/desregistrar el APM)
 
   // --- Ruta de micro kCustom 48k (Stage 4) ---
@@ -107,13 +115,12 @@ class RnnoiseProcessor
   std::vector<VfxChain*> fx_chains_;    // una cadena mono por canal
   std::vector<float> fx_scratch_;       // buffer [-1,1] reutilizable
 
-  // [chatpapol 48k] AGC + noise gate adaptativo del path custom (la ruta kCustom
-  // no pasa por el AGC/NS del APM). El gate atenúa el ruido en silencios sin
-  // agachar la voz (RNNoise sí la agachaba a 48k). Estado persistente:
-  float agc_gain_ = 1.0f;
-  float gate_env_ = 0.0f;     // envolvente del nivel (pico suavizado)
-  float gate_floor_ = 1e9f;   // piso de ruido estimado (arranca alto, adapta)
-  float gate_gain_ = 1.0f;    // ganancia del gate (1 abierto … 0.1 cerrado)
+  // [chatpapol 48k] Boost de captura (volumen de entrada) + supresor espectral
+  // propio. Reemplazan al viejo AGC+gate siempre-on (que machacaba el audio
+  // incluso sin filtros). El boost lo controla el usuario; la NS es Wiener+MCRA.
+  float input_gain_ = 1.0f;   // multiplicador de captura (1.0 = sin cambio)
+  int ns_level_ = 1;          // 0 off · 1 estándar · 2 fuerte
+  SpectralDenoiser ns48_;     // supresor espectral del path 48k
 
   // monitor local ("escucharme")
   bool monitor_on_ = false;

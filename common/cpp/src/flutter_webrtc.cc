@@ -1376,6 +1376,32 @@ void FlutterWebRTC::HandleMethodCall(
     if (it != params.end()) enabled = GetValue<bool>(it->second);
     rnnoise_processor()->SetMonitor(enabled);
     result->Success();
+  } else if (method_call.method_name().compare("setInputGain") == 0) {
+    // [chatpapol] boost de captura (volumen de entrada) del path 48k.
+    if (!method_call.arguments()) {
+      result->Error("Bad Arguments", "Bad arguments received");
+      return;
+    }
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    double gain = 1.0;
+    auto it = params.find(EncodableValue("gain"));
+    if (it != params.end()) gain = GetValue<double>(it->second);
+    rnnoise_processor()->SetInputGain(static_cast<float>(gain));
+    result->Success();
+  } else if (method_call.method_name().compare("setNsLevel") == 0) {
+    // [chatpapol] nivel del supresor espectral del path 48k (0/1/2).
+    if (!method_call.arguments()) {
+      result->Error("Bad Arguments", "Bad arguments received");
+      return;
+    }
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    int level = 1;
+    auto it = params.find(EncodableValue("level"));
+    if (it != params.end()) level = GetValue<int>(it->second);
+    rnnoise_processor()->SetNsLevel(level);
+    result->Success();
   } else if (method_call.method_name().compare("setUserEq") == 0) {
     // [chatpapol] EQ por-usuario, individual y LOCAL. Registra (o actualiza) un
     // sink sobre la pista remota `trackId`: captura su PCM (AddSink), aplica
