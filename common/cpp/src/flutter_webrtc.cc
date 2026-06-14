@@ -1374,7 +1374,13 @@ void FlutterWebRTC::HandleMethodCall(
     bool enabled = false;
     auto it = params.find(EncodableValue("enabled"));
     if (it != params.end()) enabled = GetValue<bool>(it->second);
-    rnnoise_processor()->SetMonitor(enabled);
+    auto proc = rnnoise_processor();
+    proc->SetMonitor(enabled);
+    // Instala el post-procesador para que el APM llame a Process(): si no, el
+    // monitor "escucharme" NO suena en el path 16k cuando RNNoise/efectos están
+    // off (Process nunca corre → EmitMonitorLocked tampoco). Nunca null.
+    auto apm = audio_processing();
+    if (apm) apm->SetCapturePostProcessing(proc);
     result->Success();
   } else if (method_call.method_name().compare("setInputGain") == 0) {
     // [chatpapol] boost de captura (volumen de entrada) del path 48k.
@@ -1401,6 +1407,24 @@ void FlutterWebRTC::HandleMethodCall(
     auto it = params.find(EncodableValue("level"));
     if (it != params.end()) level = GetValue<int>(it->second);
     rnnoise_processor()->SetNsLevel(level);
+    result->Success();
+  } else if (method_call.method_name().compare("startMicDump") == 0) {
+    // [chatpapol diag] graba el micro (crudo vs procesado) a .wav en 'dir'.
+    // Instala el procesador para que Process() corra y capture.
+    std::string dir;
+    if (method_call.arguments()) {
+      const EncodableMap params =
+          GetValue<EncodableMap>(*method_call.arguments());
+      auto it = params.find(EncodableValue("dir"));
+      if (it != params.end()) dir = GetValue<std::string>(it->second);
+    }
+    auto proc = rnnoise_processor();
+    proc->StartDump(dir);
+    auto apm = audio_processing();
+    if (apm) apm->SetCapturePostProcessing(proc);
+    result->Success();
+  } else if (method_call.method_name().compare("stopMicDump") == 0) {
+    rnnoise_processor()->StopDump();  // escribe diag-raw.wav / diag-out.wav
     result->Success();
   } else if (method_call.method_name().compare("setUserEq") == 0) {
     // [chatpapol] EQ por-usuario, individual y LOCAL. Registra (o actualiza) un

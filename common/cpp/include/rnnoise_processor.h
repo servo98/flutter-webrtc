@@ -77,6 +77,11 @@ class RnnoiseProcessor
   // [chatpapol] Nivel del supresor espectral del path 48k: 0=off, 1=estándar,
   // 2=fuerte. Reemplaza al viejo gate+AGC. (El path 16k sigue usando RNNoise.)
   void SetNsLevel(int level);
+  // [chatpapol diag] Graba el micro a .wav por etapas (crudo / procesado) en
+  // [dir] para diagnosticar el audio con datos reales. StopDump escribe los
+  // archivos. Mientras graba, active() es true (fuerza que Process() corra).
+  void StartDump(const std::string& dir);
+  void StopDump();
   bool active();  // ¿hay algo que procesar? (para registrar/desregistrar el APM)
 
   // --- Ruta de micro kCustom 48k (Stage 4) ---
@@ -121,6 +126,13 @@ class RnnoiseProcessor
   float input_gain_ = 1.0f;   // multiplicador de captura (1.0 = sin cambio)
   int ns_level_ = 1;          // 0 off · 1 estándar · 2 fuerte
   SpectralDenoiser ns48_;     // supresor espectral del path 48k
+
+  // [chatpapol diag] grabación de diagnóstico (crudo vs procesado) a .wav.
+  bool dump_on_ = false;
+  std::string dump_dir_;
+  std::vector<float> dump_raw_, dump_out_;  // FloatS16, mono
+  int dump_rate_ = 0;
+  void DumpAppendLocked(std::vector<float>& buf, const float* data, int n);
 
   // monitor local ("escucharme")
   bool monitor_on_ = false;

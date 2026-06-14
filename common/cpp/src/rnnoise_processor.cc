@@ -1,13 +1,40 @@
 // rnnoise_processor.cc — ver rnnoise_processor.h.
 #include "rnnoise_processor.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #include "voicefx.h"  // C ABI de los efectos (no en el header público)
+
+namespace {
+// [chatpapol diag] Escribe muestras FloatS16 mono como WAV PCM16. Para el modo
+// diagnóstico (medir el audio real fuera de la app, sin adivinar).
+void WriteWavPcm16(const std::string& path, const std::vector<float>& s16,
+                   int rate) {
+  std::ofstream f(path, std::ios::binary);
+  if (!f) return;
+  const uint32_t n = static_cast<uint32_t>(s16.size());
+  const uint32_t dataBytes = n * 2;
+  const uint32_t sr = rate > 0 ? static_cast<uint32_t>(rate) : 48000;
+  auto w32 = [&](uint32_t v) { f.write(reinterpret_cast<char*>(&v), 4); };
+  auto w16 = [&](uint16_t v) { f.write(reinterpret_cast<char*>(&v), 2); };
+  f.write("RIFF", 4); w32(36 + dataBytes); f.write("WAVE", 4);
+  f.write("fmt ", 4); w32(16); w16(1); w16(1);
+  w32(sr); w32(sr * 2); w16(2); w16(16);
+  f.write("data", 4); w32(dataBytes);
+  for (float v : s16) {
+    int iv = static_cast<int>(v < 0 ? v - 0.5f : v + 0.5f);
+    if (iv > 32767) iv = 32767; else if (iv < -32768) iv = -32768;
+    int16_t s = static_cast<int16_t>(iv);
+    f.write(reinterpret_cast<char*>(&s), 2);
+  }
+}
+}  // namespace
 
 // [chatpapol] Monitor local ("escucharme"): reproduce el micro ya procesado en
 // los altavoces vía WinMM waveOut (winmm.lib ya está enlazado). Buffers cortos
@@ -209,27 +236,29 @@ void RnnoiseProcessor::ProcessCustom48(float* data, int num_frames) {
     }
   }
 
+  // [diag] crudo (entrada del path 48k, antes de procesar).
+  if (dump_on_) {
+    dump_rate_ = 48000;
+    DumpAppendLocked(dump_raw_, data, num_frames);
+  }
+
   const bool fx_active = fx_on_ && !fx_parsed_.empty();
   // Passthrough BIT-EXACT cuando no hay NADA activo. Arregla "el 48k falla
   // incluso sin filtros": el viejo AGC+gate se aplicaba SIEMPRE (machacaba el
   // audio aunque todo estuviera off). Ahora, sin procesado, el audio pasa intacto.
-  if (input_gain_ == 1.0f && ns_level_ <= 0 && !fx_active && !monitor_on_) return;
-
-  // 1) Boost de captura (volumen de entrada). El path kCustom no pasa por el AGC
-  //    del APM; el usuario sube su nivel aquí. Hard-clamp de seguridad.
-  if (input_gain_ != 1.0f) {
-    for (int i = 0; i < num_frames; ++i) {
-      float v = data[i] * input_gain_;
-      if (v > 32767.0f) v = 32767.0f;
-      else if (v < -32768.0f) v = -32768.0f;
-      data[i] = v;
-    }
+  if (input_gain_ == 1.0f && ns_level_ <= 0 && !fx_active && !monitor_on_ &&
+      !dump_on_) {
+    return;
   }
 
-  // 2) Supresión de ruido ESPECTRAL propia (Wiener + MCRA, ver spectral_ns.cc).
-  //    Limpia el ruido DURANTE el habla SIN agachar la voz (a diferencia del
-  //    viejo gate, que solo cortaba silencios). num_frames debe ser 480 (hop);
-  //    si no, Process() es no-op seguro.
+  // ORDEN de la cadena (teoría): supresión de ruido → efectos/EQ → ganancia →
+  // LIMITADOR (último). La ganancia va DESPUÉS de limpiar (no amplifica ruido)
+  // y el limitador evita el clipping duro ("truena"). AEC iría antes pero el
+  // path kCustom no pasa por el APM (por eso pide auriculares).
+
+  // 1) Supresión de ruido ESPECTRAL propia (Wiener + MCRA, ver spectral_ns.cc).
+  //    Limpia el ruido DURANTE el habla SIN agachar la voz. num_frames debe ser
+  //    480 (hop); si no, Process() es no-op seguro.
   ns48_.SetLevel(ns_level_);
   if (ns_level_ > 0) ns48_.Process(data, num_frames);
 
@@ -257,8 +286,30 @@ void RnnoiseProcessor::ProcessCustom48(float* data, int num_frames) {
     }
   }
 
-  // 3) Monitor: el mismo buffer 48k ya procesado (rate_=48000 => waveOut 48k).
+  // 3) Ganancia (boost) + LIMITADOR suave como ÚLTIMA etapa. La ganancia va
+  //    aquí (tras limpiar/efectos) y el limitador (soft-knee con tanh sobre el
+  //    85% de escala) evita el clipping duro que "truena". Corre siempre (cuando
+  //    algo está activo) para atrapar también los picos de NS/efectos.
+  {
+    const float g = input_gain_;
+    constexpr float kCeil = 32767.0f;
+    constexpr float kKnee = 0.85f * kCeil;
+    for (int i = 0; i < num_frames; ++i) {
+      float v = data[i] * g;
+      const float a = v < 0 ? -v : v;
+      if (a > kKnee) {
+        const float over = (a - kKnee) / (kCeil - kKnee);
+        const float comp = kKnee + (kCeil - kKnee) * std::tanh(over);
+        v = v < 0 ? -comp : comp;
+      }
+      data[i] = v;
+    }
+  }
+
+  // 4) Monitor: el mismo buffer 48k ya procesado (rate_=48000 => waveOut 48k).
   if (monitor_on_) EmitMonitorLocked(num_frames, data);
+  // [diag] procesado (salida del path 48k).
+  if (dump_on_) DumpAppendLocked(dump_out_, data, num_frames);
 }
 
 void RnnoiseProcessor::Reset(int new_rate) {
@@ -275,6 +326,12 @@ void RnnoiseProcessor::Process(int num_bands, int num_frames, int buffer_size,
   if (num_bands < 1) num_bands = 1;
   const int chans = chans_ > 0 ? chans_ : 1;
 
+  // [diag] crudo: banda 0 del canal 0 (post-APM, antes de RNNoise/efectos).
+  if (dump_on_) {
+    dump_rate_ = (rate_ > 0 && num_bands > 0) ? rate_ / num_bands : 16000;
+    DumpAppendLocked(dump_raw_, buffer, num_frames);
+  }
+
   // 1) RNNoise sobre la banda 0 (offset c*num_frames), por canal.
   if (rnnoise_on_ && !engines_.empty()) {
     for (int c = 0; c < chans && c < static_cast<int>(engines_.size()); ++c) {
@@ -289,6 +346,7 @@ void RnnoiseProcessor::Process(int num_bands, int num_frames, int buffer_size,
   if (!fx_active) {
     // Sin efectos: monitor reproduce la banda 0 del canal 0 (post-RNNoise).
     if (monitor_on_) EmitMonitorLocked(num_frames, buffer);
+    if (dump_on_) DumpAppendLocked(dump_out_, buffer, num_frames);
     return;
   }
 
@@ -396,7 +454,39 @@ void RnnoiseProcessor::EmitMonitorLocked(int num_frames, const float* band0) {
 
 bool RnnoiseProcessor::active() {
   std::lock_guard<std::mutex> lock(mu_);
-  return rnnoise_on_ || (fx_on_ && !fx_parsed_.empty());
+  return rnnoise_on_ || monitor_on_ || dump_on_ ||
+         (fx_on_ && !fx_parsed_.empty());
+}
+
+void RnnoiseProcessor::StartDump(const std::string& dir) {
+  std::lock_guard<std::mutex> lock(mu_);
+  dump_dir_ = dir;
+  dump_raw_.clear();
+  dump_out_.clear();
+  dump_raw_.reserve(48000 * 30);
+  dump_out_.reserve(48000 * 30);
+  dump_rate_ = 0;
+  dump_on_ = true;
+}
+
+void RnnoiseProcessor::StopDump() {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!dump_on_) return;
+  dump_on_ = false;
+  WriteWavPcm16(dump_dir_ + "/diag-raw.wav", dump_raw_, dump_rate_);
+  WriteWavPcm16(dump_dir_ + "/diag-out.wav", dump_out_, dump_rate_);
+  dump_raw_.clear();
+  dump_out_.clear();
+  dump_raw_.shrink_to_fit();
+  dump_out_.shrink_to_fit();
+}
+
+// requiere mu_ tomado. Cap ~30s para no crecer sin límite.
+void RnnoiseProcessor::DumpAppendLocked(std::vector<float>& buf,
+                                        const float* data, int n) {
+  const int cap = (dump_rate_ > 0 ? dump_rate_ : 48000) * 30;
+  if (static_cast<int>(buf.size()) > cap) return;
+  buf.insert(buf.end(), data, data + n);
 }
 
 void RnnoiseProcessor::RebuildFxLocked(int band_rate, int frames) {
